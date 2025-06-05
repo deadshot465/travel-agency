@@ -1,11 +1,11 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct PingRequest {
+pub struct InteractionRequest {
     pub r#type: i32,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct PingResponse {
+pub struct InteractionResponse {
     pub r#type: i32,
 }

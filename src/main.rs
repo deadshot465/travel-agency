@@ -1,7 +1,9 @@
 use axum::{Router, routing::post};
 use tracing::Level;
 
-use crate::{controller::ping::ack_ping, shared::structs::config::CONFIGURATION};
+use crate::{
+    controller::discord::interaction::handle_interaction, shared::structs::config::CONFIGURATION,
+};
 
 mod controller;
 mod shared;
@@ -28,7 +30,7 @@ async fn main() -> anyhow::Result<()> {
         );
     }
 
-    let app = Router::new().route("/api/ping", post(ack_ping));
+    let app = Router::new().route("/api/discord/interaction", post(handle_interaction));
 
     let listener = tokio::net::TcpListener::bind(&CONFIGURATION.server_bind_point).await?;
     axum::serve(listener, app).await?;
