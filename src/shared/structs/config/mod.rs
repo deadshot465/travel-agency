@@ -1,9 +1,6 @@
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 
-pub const CONFIG_DIRECTORY: &str = "config";
-pub const CONFIG_FILE_NAME: &str = "config.toml";
-
 pub static CONFIGURATION: Lazy<Configuration> = Lazy::new(|| {
     let config =
         Configuration::load_from_config_file().expect("Failed to load config from config file.");
@@ -27,12 +24,14 @@ impl Configuration {
     }
 
     pub fn load_from_config_file() -> anyhow::Result<Self> {
-        let config_directory = std::path::Path::new(CONFIG_DIRECTORY);
+        let config_directory_path = std::env::var("CONFIG_DIRECTORY")?;
+        let config_directory = std::path::Path::new(&config_directory_path);
         if !config_directory.exists() {
-            std::fs::create_dir(CONFIG_DIRECTORY)?;
+            std::fs::create_dir_all(&config_directory_path)?;
         }
 
-        let configuration_path = config_directory.join(CONFIG_FILE_NAME);
+        let config_file_name = std::env::var("CONFIG_FILE_NAME")?;
+        let configuration_path = config_directory.join(&config_file_name);
         if !configuration_path.exists() {
             let new_config = Configuration::new();
             let serialized = toml::to_string_pretty(&new_config)?;
