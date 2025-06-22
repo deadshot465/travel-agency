@@ -2,7 +2,7 @@ use axum::{Router, middleware::from_fn, routing::post};
 use tracing::Level;
 
 use crate::{
-    controller::discord::interaction::handle_interaction,
+    controller::discord::interaction::{COMMAND_REGISTRY, handle_interaction},
     shared::middleware::discord_validation::validate_interaction,
 };
 
@@ -11,7 +11,7 @@ mod shared;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let log_level = match std::env::var("LOG_LEVEL")?.as_str() {
+    let log_level = match std::env::var("LOG_LEVEL").unwrap_or_default().as_str() {
         "TRACE" => Level::TRACE,
         "INFO" => Level::INFO,
         "WARN" => Level::WARN,
@@ -30,6 +30,17 @@ async fn main() -> anyhow::Result<()> {
             e
         );
     }
+
+    let available_commands = if let Ok(guard) = COMMAND_REGISTRY.lock() {
+        guard
+            .iter()
+            .map(|(cmd_name, _func)| cmd_name.clone())
+            .collect::<Vec<_>>()
+    } else {
+        vec![]
+    };
+
+    tracing::info!("Available commands: {:?}", &available_commands);
 
     let app = Router::new()
         .route("/api/discord/interaction", post(handle_interaction))
