@@ -3,7 +3,10 @@ use tracing::Level;
 
 use crate::{
     controller::discord::interaction::{COMMAND_REGISTRY, handle_interaction},
-    shared::middleware::discord_validation::validate_interaction,
+    shared::{
+        middleware::discord_validation::validate_interaction,
+        structs::{AppState, LLMClients, config::Configuration},
+    },
 };
 
 mod controller;
@@ -42,9 +45,15 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::info!("Available commands: {:?}", &available_commands);
 
+    let app_state = AppState {
+        config: Configuration::load_from_config_file()?,
+        llm_clients: LLMClients::new(),
+    };
+
     let app = Router::new()
         .route("/api/discord/interaction", post(handle_interaction))
-        .layer(from_fn(validate_interaction));
+        .layer(from_fn(validate_interaction))
+        .with_state(app_state);
 
     let server_bind_point = std::env::var("SERVER_BIND_POINT")?;
     let port = std::env::var("PORT")?;

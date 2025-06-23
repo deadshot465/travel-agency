@@ -16,7 +16,7 @@ pub fn command_handler(_attr: TokenStream, item: TokenStream) -> TokenStream {
             fn [<__register_command_ #fn_name>]() {
                 crate::controller::discord::interaction::register_command(
                     #fn_name_str,
-                    |data| Box::pin(#fn_name(data))
+                    |data, app_state| Box::pin(#fn_name(data, app_state))
                 );
             }
         }

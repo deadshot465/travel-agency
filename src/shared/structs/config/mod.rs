@@ -1,17 +1,11 @@
-use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
-
-pub static CONFIGURATION: Lazy<Configuration> = Lazy::new(|| {
-    let config =
-        Configuration::load_from_config_file().expect("Failed to load config from config file.");
-    config
-});
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Configuration {
     pub server_bind_point: String,
     pub server_address: String,
     pub log_level: String,
+    pub language_decider_prompt: String,
 }
 
 impl Configuration {
@@ -20,6 +14,7 @@ impl Configuration {
             server_bind_point: "0.0.0.0:80".into(),
             server_address: "http://localhost:80/".into(),
             log_level: "DEBUG".into(),
+            language_decider_prompt: "".into(),
         }
     }
 

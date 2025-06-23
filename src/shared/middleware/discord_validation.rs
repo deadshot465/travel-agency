@@ -20,15 +20,11 @@ pub async fn validate_interaction(
         .and_then(|v| v.to_str().map(ToString::to_string).ok())
         .unwrap_or_default();
 
-    tracing::debug!("Signature: {}", &signature);
-
     let timestamp = headers
         .get(TIMESTAMP_HEADER)
         .cloned()
         .and_then(|v| v.to_str().map(ToString::to_string).ok())
         .unwrap_or_default();
-
-    tracing::debug!("Timestamp: {}", &timestamp);
 
     match buffer_request_body(request, signature, timestamp).await {
         Ok(request) => next.run(request).await,
@@ -63,13 +59,10 @@ fn validate(bytes: Bytes, signature: String, timestamp: String) -> Result<Bytes,
     let public_key =
         std::env::var("APPLICATION_PUBLIC_KEY").expect("Failed to get application public key.");
 
-    tracing::debug!("Public key: {}", &public_key);
-
     let body = bytes.to_vec();
 
     match String::from_utf8(body) {
         Ok(s) => {
-            tracing::debug!("String body: {}", &s);
             let message = format!("{}{}", timestamp, s);
 
             let signature_bytes =
