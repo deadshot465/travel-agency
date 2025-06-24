@@ -34,14 +34,12 @@ async fn main() -> anyhow::Result<()> {
         );
     }
 
-    let available_commands = if let Ok(guard) = COMMAND_REGISTRY.lock() {
-        guard
-            .iter()
-            .map(|(cmd_name, _func)| cmd_name.clone())
-            .collect::<Vec<_>>()
-    } else {
-        vec![]
-    };
+    let available_commands = COMMAND_REGISTRY
+        .lock()
+        .await
+        .iter()
+        .map(|(cmd_name, _func)| cmd_name.clone())
+        .collect::<Vec<_>>();
 
     tracing::info!("Available commands: {:?}", &available_commands);
 

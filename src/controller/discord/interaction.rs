@@ -16,9 +16,9 @@ use serenity::all::{CommandData, CommandInteraction};
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Mutex;
+use tokio::sync::Mutex;
 
-use crate::shared::CHATGPT_4O_LATEST;
+use crate::shared::GPT_41;
 use crate::shared::structs::AppState;
 use crate::shared::structs::discord::interaction::{InteractionRequest, InteractionResponse};
 
@@ -31,14 +31,13 @@ lazy_static::lazy_static! {
 
 pub fn register_command(name: &str, handler: CommandHandler) {
     COMMAND_REGISTRY
-        .lock()
-        .unwrap()
+        .blocking_lock()
         .insert(name.to_string(), handler);
 }
 
 macro_rules! call_command {
     ($command_name:expr, $data:expr, $app_state:expr) => {{
-        let registry = COMMAND_REGISTRY.lock().unwrap();
+        let registry = COMMAND_REGISTRY.lock().await;
         if let Some(handler) = registry.get($command_name.as_str()) {
             handler($data, $app_state).await
         } else {
@@ -47,6 +46,7 @@ macro_rules! call_command {
     }};
 }
 
+#[axum::debug_handler]
 pub async fn handle_interaction(State(app_state): State<AppState>, request: Bytes) -> Response {
     let bytes = request.to_vec();
 
@@ -56,7 +56,7 @@ pub async fn handle_interaction(State(app_state): State<AppState>, request: Byte
                 "Received incoming command interaction: {:?}",
                 &command_request
             );
-            let _ = handle_command_interaction(command_request, app_state);
+            let _ = handle_command_interaction(command_request, app_state).await;
             StatusCode::OK.into_response()
         }
         Err(_) => match serde_json::from_slice::<InteractionRequest>(&bytes) {
@@ -122,14 +122,15 @@ async fn plan(data: CommandData, app_state: AppState) -> anyhow::Result<()> {
                         "enum": ["English", "Simplified Chinese", "Traditional Chinese", "Japanese"]
                     }
                 },
-                "required": ["language"]
+                "required": ["language"],
+                "additionalProperties": false
             }))
             .strict(true)
             .build()?)
         .build()?;
 
     let request = CreateChatCompletionRequestArgs::default()
-        .model(CHATGPT_4O_LATEST)
+        .model(GPT_41)
         .messages(messages)
         .temperature(0.3)
         .tools(vec![tool])
@@ -142,6 +143,16 @@ async fn plan(data: CommandData, app_state: AppState) -> anyhow::Result<()> {
         .chat()
         .create(request)
         .await;
+
+    match response {
+        Ok(res) => {
+            tracing::debug!("{:?}", &res.choices[0].message);
+        }
+        Err(e) => {
+            let error_msg = format!("Failed to call OpenAI API: {:?}", e);
+            tracing::error!("{}", error_msg);
+        }
+    }
 
     Ok(())
 }
