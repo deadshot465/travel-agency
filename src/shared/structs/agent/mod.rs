@@ -1,3 +1,5 @@
+use serde::{Deserialize, Serialize};
+
 pub mod food;
 pub mod history;
 pub mod modern;
@@ -15,4 +17,17 @@ pub enum Agent {
     History,
     Modern,
     Nature,
+}
+
+#[derive(Deserialize, Serialize, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Language {
+    English,
+    Japanese,
+    Chinese,
+    Other,
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct LanguageTriageArgumants {
+    pub language: Language,
 }

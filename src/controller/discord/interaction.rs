@@ -1,7 +1,8 @@
 use async_openai::types::{
     ChatCompletionRequestMessage, ChatCompletionRequestSystemMessageArgs,
     ChatCompletionRequestUserMessageArgs, ChatCompletionToolArgs, ChatCompletionToolChoiceOption,
-    ChatCompletionToolType, CreateChatCompletionRequestArgs, FunctionObjectArgs,
+    ChatCompletionToolType, CreateChatCompletionRequestArgs, FunctionObjectArgs, ResponseFormat,
+    ResponseFormatJsonSchema,
 };
 use axum::body::Bytes;
 use axum::http::StatusCode;
@@ -18,9 +19,10 @@ use std::future::Future;
 use std::pin::Pin;
 use tokio::sync::Mutex;
 
-use crate::shared::GPT_41;
 use crate::shared::structs::AppState;
+use crate::shared::structs::agent::{Language, LanguageTriageArgumants};
 use crate::shared::structs::discord::interaction::{InteractionRequest, InteractionResponse};
+use crate::shared::{GEMINI_25_PRO, GPT_41};
 
 type CommandHandler =
     fn(CommandData, AppState) -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send>>;
@@ -93,20 +95,24 @@ async fn plan(data: CommandData, app_state: AppState) -> anyhow::Result<()> {
         .as_str()
         .map(ToString::to_string)
         .unwrap_or_default();
-    let system_prompt = app_state.config.language_decider_prompt.clone();
 
-    let messages = vec![
-        ChatCompletionRequestMessage::System(
-            ChatCompletionRequestSystemMessageArgs::default()
-                .content(system_prompt)
-                .build()?,
-        ),
-        ChatCompletionRequestMessage::User(
-            ChatCompletionRequestUserMessageArgs::default()
-                .content(user_prompt)
-                .build()?,
-        ),
-    ];
+    let language = determine_language(&user_prompt, &app_state).await?;
+
+    let orchestrator_system_prompt = match language {
+        Language::Chinese => app_state.config.chinese_orchestrator_prompt.clone(),
+        Language::Japanese => app_state.config.japanese_orchestrator_prompt.clone(),
+        _ => app_state.config.english_orchestrator_prompt.clone(),
+    };
+
+    orchestrate(&orchestrator_system_prompt, &user_prompt, &app_state).await?;
+
+    Ok(())
+}
+
+async fn determine_language(user_prompt: &str, app_state: &AppState) -> anyhow::Result<Language> {
+    let system_prompt = app_state.config.language_triage_prompt.clone();
+
+    let messages = build_one_shot_messages(&system_prompt, user_prompt)?;
 
     let tool = ChatCompletionToolArgs::default()
         .r#type(ChatCompletionToolType::Function)
@@ -119,7 +125,7 @@ async fn plan(data: CommandData, app_state: AppState) -> anyhow::Result<()> {
                     "language": {
                         "type": "string",
                         "description": "The language of the user's prompt, e.g. Simplified Chinese, English, Japanese, etc.",
-                        "enum": ["English", "Simplified Chinese", "Traditional Chinese", "Japanese"]
+                        "enum": ["English", "Chinese", "Japanese", "Other"]
                     }
                 },
                 "required": ["language"],
@@ -146,13 +152,130 @@ async fn plan(data: CommandData, app_state: AppState) -> anyhow::Result<()> {
 
     match response {
         Ok(res) => {
-            tracing::debug!("{:?}", &res.choices[0].message);
+            let arguments =
+                res.choices
+                    .first()
+                    .and_then(|choice| {
+                        let message = &choice.message;
+                        message.tool_calls.as_ref().and_then(|calls| {
+                            calls.first().map(|call| call.function.arguments.clone())
+                        })
+                    })
+                    .unwrap_or_default();
+
+            Ok(serde_json::from_str::<LanguageTriageArgumants>(&arguments)?.language)
         }
         Err(e) => {
-            let error_msg = format!("Failed to call OpenAI API: {:?}", e);
+            let error_msg = format!("Failed to call OpenAI API: {:?}. Fall back to English.", e);
             tracing::error!("{}", error_msg);
+            Ok(Language::English)
+        }
+    }
+}
+
+async fn orchestrate(
+    system_prompt: &str,
+    user_prompt: &str,
+    app_state: &AppState,
+) -> anyhow::Result<()> {
+    let messages = build_one_shot_messages(system_prompt, user_prompt)?;
+
+    let request = CreateChatCompletionRequestArgs::default()
+        .model(GEMINI_25_PRO)
+        .messages(messages)
+        .temperature(0.3)
+        .response_format(ResponseFormat::JsonSchema { json_schema: ResponseFormatJsonSchema {
+            description: Some("Break the user's request into subtasks and orchestrate in order to get the final result.".into()),
+            name: "orchestrate_tasks".into(),
+            schema: Some(json!({
+                "type": "object",
+                "properties": {
+                    "greeting_message": {
+                        "type": "string",
+                        "description": "Greeting message to greet the user and inform the user that you have received their request and is now planning the itinerary."
+                    },
+                    "analysis": {
+                        "type": "string",
+                        "description": "Brief analysis of what the user wants."
+                    },
+                    "tasks": {
+                        "type": "array",
+                        "description": "A list of tasks to assign to agents.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "task_id": {
+                                    "type": "string",
+                                    "description": "A unique task ID for each task."
+                                },
+                                "agent": {
+                                    "type": "string",
+                                    "description": "Agent name to assign this task to.",
+                                    "enum": ["Food", "History", "Modern", "Nature", "Transport"]
+                                },
+                                "instruction": {
+                                    "type": "string",
+                                    "description": "Specific instruction for the agent to complete."
+                                },
+                                "dependencies": {
+                                    "type": "array",
+                                    "description": "List of task IDs that must complete before this task.",
+                                    "items": {
+                                        "type": "string"
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "synthesis_plan": {
+                        "type": "string",
+                        "description": "How you'll combine the results."
+                    }
+                },
+                "required": ["greeting_message", "analysis", "tasks", "synthesis_plan"],
+                "additionalProperties": false
+            })),
+            strict: Some(true),
+        } })
+        .build()?;
+
+    let response = app_state
+        .llm_clients
+        .open_router_client
+        .chat()
+        .create(request)
+        .await;
+
+    match response {
+        Ok(res) => {
+            tracing::info!(
+                "Orchestration response: {}",
+                res.choices[0].message.content.clone().unwrap_or_default()
+            )
+        }
+        Err(e) => {
+            let error_msg = format!("Error when creating orchestration tasks: {:?}", e);
+            tracing::error!("{}", &error_msg);
         }
     }
 
     Ok(())
+}
+
+fn build_one_shot_messages(
+    system_prompt: &str,
+    user_prompt: &str,
+) -> anyhow::Result<Vec<ChatCompletionRequestMessage>> {
+    Ok(vec![
+        ChatCompletionRequestMessage::System(
+            ChatCompletionRequestSystemMessageArgs::default()
+                .content(system_prompt)
+                .build()?,
+        ),
+        ChatCompletionRequestMessage::User(
+            ChatCompletionRequestUserMessageArgs::default()
+                .content(user_prompt)
+                .build()?,
+        ),
+    ])
 }

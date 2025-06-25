@@ -5,7 +5,10 @@ pub struct Configuration {
     pub server_bind_point: String,
     pub server_address: String,
     pub log_level: String,
-    pub language_decider_prompt: String,
+    pub language_triage_prompt: String,
+    pub english_orchestrator_prompt: String,
+    pub chinese_orchestrator_prompt: String,
+    pub japanese_orchestrator_prompt: String,
 }
 
 impl Configuration {
@@ -14,7 +17,10 @@ impl Configuration {
             server_bind_point: "0.0.0.0:80".into(),
             server_address: "http://localhost:80/".into(),
             log_level: "DEBUG".into(),
-            language_decider_prompt: "".into(),
+            language_triage_prompt: "".into(),
+            english_orchestrator_prompt: "".into(),
+            chinese_orchestrator_prompt: "".into(),
+            japanese_orchestrator_prompt: "".into(),
         }
     }
 
