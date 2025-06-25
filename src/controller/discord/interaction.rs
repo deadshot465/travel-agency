@@ -97,12 +97,14 @@ async fn plan(data: CommandData, app_state: AppState) -> anyhow::Result<()> {
         .unwrap_or_default();
 
     let language = determine_language(&user_prompt, &app_state).await?;
+    tracing::debug!("Triage result: {:?}", language);
 
     let orchestrator_system_prompt = match language {
         Language::Chinese => app_state.config.chinese_orchestrator_prompt.clone(),
         Language::Japanese => app_state.config.japanese_orchestrator_prompt.clone(),
         _ => app_state.config.english_orchestrator_prompt.clone(),
     };
+    tracing::debug!("Orchestrator prompt: {}", &orchestrator_system_prompt);
 
     orchestrate(&orchestrator_system_prompt, &user_prompt, &app_state).await?;
 
@@ -179,6 +181,7 @@ async fn orchestrate(
     app_state: &AppState,
 ) -> anyhow::Result<()> {
     let messages = build_one_shot_messages(system_prompt, user_prompt)?;
+    tracing::debug!("One shot message: {:?}", &messages);
 
     let request = CreateChatCompletionRequestArgs::default()
         .model(GEMINI_25_PRO)
@@ -239,6 +242,8 @@ async fn orchestrate(
         } })
         .build()?;
 
+    tracing::debug!("Request successfully built.");
+
     let response = app_state
         .llm_clients
         .open_router_client
@@ -246,12 +251,14 @@ async fn orchestrate(
         .create(request)
         .await;
 
+    tracing::debug!("Response: {:?}", &response);
+
     match response {
         Ok(res) => {
             tracing::info!(
                 "Orchestration response: {}",
                 res.choices[0].message.content.clone().unwrap_or_default()
-            )
+            );
         }
         Err(e) => {
             let error_msg = format!("Error when creating orchestration tasks: {:?}", e);
