@@ -1,4 +1,4 @@
-use super::{Agent, Task};
+use super::{Agent, Taskable};
 
 pub struct Nature {
     pub prompt: String,
@@ -14,7 +14,7 @@ impl Nature {
     }
 }
 
-impl Task for Nature {
+impl Taskable for Nature {
     fn execute(self) {
         // Implementation will be added later
     }

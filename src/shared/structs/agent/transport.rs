@@ -1,4 +1,4 @@
-use super::{Agent, Task};
+use super::{Agent, Taskable};
 
 pub struct Transport {
     pub prompt: String,
@@ -14,7 +14,7 @@ impl Transport {
     }
 }
 
-impl Task for Transport {
+impl Taskable for Transport {
     fn execute(self) {
         // Implementation will be added later
     }

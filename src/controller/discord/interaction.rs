@@ -13,19 +13,25 @@ use axum::{
 };
 use command_macros::command_handler;
 use serde_json::json;
-use serenity::all::{CommandData, CommandInteraction};
+use serenity::all::{
+    CommandData, CommandInteraction, CreateInteractionResponse, CreateInteractionResponseMessage,
+    EditInteractionResponse, EditWebhookMessage,
+};
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use tokio::sync::Mutex;
 
 use crate::shared::structs::AppState;
-use crate::shared::structs::agent::{Language, LanguageTriageArgumants};
+use crate::shared::structs::agent::{Language, LanguageTriageArgumants, OrchestrationResponse};
 use crate::shared::structs::discord::interaction::{InteractionRequest, InteractionResponse};
-use crate::shared::{GEMINI_25_PRO, GPT_41};
+use crate::shared::{
+    DISCORD_INTERACTION_CALLBACK_ENDPOINT, DISCORD_INTERACTION_EDIT_ENDPOINT,
+    DISCORD_ROOT_ENDPOINT, GEMINI_25_PRO, GPT_41,
+};
 
 type CommandHandler =
-    fn(CommandData, AppState) -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send>>;
+    fn(CommandInteraction, AppState) -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send>>;
 
 lazy_static::lazy_static! {
     pub static ref COMMAND_REGISTRY: Mutex<HashMap<String, CommandHandler>> = Mutex::new(HashMap::new());
@@ -53,13 +59,23 @@ pub async fn handle_interaction(State(app_state): State<AppState>, request: Byte
     let bytes = request.to_vec();
 
     match serde_json::from_slice::<CommandInteraction>(&bytes) {
-        Ok(command_request) => {
+        Ok(command_interaction) => {
             tracing::debug!(
                 "Received incoming command interaction: {:?}",
-                &command_request
+                &command_interaction
             );
-            let _ = handle_command_interaction(command_request, app_state).await;
-            StatusCode::OK.into_response()
+
+            tokio::spawn(async move {
+                if let Err(e) = handle_command_interaction(command_interaction, app_state).await {
+                    let error_msg = format!("Error when handling command interaction: {:?}", e);
+                    tracing::error!("{}", error_msg);
+                }
+            });
+
+            let response =
+                CreateInteractionResponse::Defer(CreateInteractionResponseMessage::new());
+
+            (StatusCode::OK, Json(response)).into_response()
         }
         Err(_) => match serde_json::from_slice::<InteractionRequest>(&bytes) {
             Ok(ping_request) => {
@@ -83,14 +99,14 @@ async fn handle_command_interaction(
     app_state: AppState,
 ) -> anyhow::Result<()> {
     let command_name = interaction.data.name.clone();
-    call_command!(command_name, interaction.data, app_state)?;
+    call_command!(command_name, interaction, app_state)?;
 
     Ok(())
 }
 
 #[command_handler]
-async fn plan(data: CommandData, app_state: AppState) -> anyhow::Result<()> {
-    let user_prompt = data.options[0]
+async fn plan(interaction: CommandInteraction, app_state: AppState) -> anyhow::Result<()> {
+    let user_prompt = interaction.data.options[0]
         .value
         .as_str()
         .map(ToString::to_string)
@@ -106,7 +122,39 @@ async fn plan(data: CommandData, app_state: AppState) -> anyhow::Result<()> {
     };
     tracing::debug!("Orchestrator prompt: {}", &orchestrator_system_prompt);
 
-    orchestrate(&orchestrator_system_prompt, &user_prompt, &app_state).await?;
+    let orchestration_response =
+        orchestrate(&orchestrator_system_prompt, &user_prompt, &app_state).await;
+    let message = match orchestration_response {
+        Ok(response) => response.greeting_message.clone(),
+        Err(e) => format!("{:?}", e),
+    };
+
+    let callback_url = format!(
+        "{}{}",
+        DISCORD_ROOT_ENDPOINT, DISCORD_INTERACTION_EDIT_ENDPOINT
+    )
+    .replace(
+        "$APPLICATION_ID",
+        interaction.application_id.get().to_string().as_str(),
+    )
+    .replace("$INTERACTION_TOKEN", interaction.token.as_str());
+
+    let edit_content = EditInteractionResponse::new().content(message);
+
+    let request = app_state
+        .http_client
+        .patch(callback_url)
+        .json(&edit_content)
+        .send()
+        .await;
+
+    match request {
+        Ok(res) => tracing::info!("Successfully edit the original response: {:?}", res),
+        Err(e) => {
+            let error_msg = format!("Failed to edit the original response: {:?}", e);
+            tracing::error!("{}", &error_msg);
+        }
+    }
 
     Ok(())
 }
@@ -179,7 +227,7 @@ async fn orchestrate(
     system_prompt: &str,
     user_prompt: &str,
     app_state: &AppState,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<OrchestrationResponse> {
     let messages = build_one_shot_messages(system_prompt, user_prompt)?;
     tracing::debug!("One shot message: {:?}", &messages);
 
@@ -244,8 +292,6 @@ async fn orchestrate(
         } })
         .build()?;
 
-    tracing::debug!("Request successfully built.");
-
     let response = app_state
         .llm_clients
         .open_router_client
@@ -253,22 +299,19 @@ async fn orchestrate(
         .create(request)
         .await;
 
-    tracing::debug!("Response: {:?}", &response);
-
     match response {
         Ok(res) => {
-            tracing::info!(
-                "Orchestration response: {}",
-                res.choices[0].message.content.clone().unwrap_or_default()
-            );
+            let content = res.choices[0].message.content.clone().unwrap_or_default();
+            let orchestration_response = serde_json::from_str::<OrchestrationResponse>(&content)?;
+            tracing::info!("Orchestration response: {:?}", &orchestration_response);
+            Ok(orchestration_response)
         }
         Err(e) => {
             let error_msg = format!("Error when creating orchestration tasks: {:?}", e);
             tracing::error!("{}", &error_msg);
+            Err(anyhow::anyhow!("{}", error_msg))
         }
     }
-
-    Ok(())
 }
 
 fn build_one_shot_messages(

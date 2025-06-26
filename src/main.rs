@@ -4,6 +4,7 @@ use tracing::Level;
 use crate::{
     controller::discord::interaction::{COMMAND_REGISTRY, handle_interaction},
     shared::{
+        USER_AGENT,
         middleware::discord_validation::validate_interaction,
         structs::{AppState, LLMClients, config::Configuration},
     },
@@ -46,6 +47,7 @@ async fn main() -> anyhow::Result<()> {
     let app_state = AppState {
         config: Configuration::load_from_config_file()?,
         llm_clients: LLMClients::new(),
+        http_client: reqwest::Client::builder().user_agent(USER_AGENT).build()?,
     };
 
     let app = Router::new()

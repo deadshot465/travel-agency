@@ -1,4 +1,4 @@
-use super::{Agent, Task};
+use super::{Agent, Taskable};
 
 pub struct Modern {
     pub prompt: String,
@@ -14,7 +14,7 @@ impl Modern {
     }
 }
 
-impl Task for Modern {
+impl Taskable for Modern {
     fn execute(self) {
         // Implementation will be added later
     }

@@ -1,4 +1,4 @@
-use super::{Agent, Task};
+use super::{Agent, Taskable};
 
 pub struct Food {
     pub prompt: String,
@@ -14,7 +14,7 @@ impl Food {
     }
 }
 
-impl Task for Food {
+impl Taskable for Food {
     fn execute(self) {
         // Implementation will be added later
     }

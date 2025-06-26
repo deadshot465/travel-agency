@@ -17,6 +17,7 @@ const DEEP_SEEK_BASE_URL: &str = "https://api.deepseek.com";
 pub struct AppState {
     pub config: Configuration,
     pub llm_clients: LLMClients,
+    pub http_client: reqwest::Client,
 }
 
 #[derive(Debug, Clone)]

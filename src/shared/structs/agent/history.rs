@@ -1,4 +1,4 @@
-use super::{Agent, Task};
+use super::{Agent, Taskable};
 
 pub struct History {
     pub prompt: String,
@@ -14,7 +14,7 @@ impl History {
     }
 }
 
-impl Task for History {
+impl Taskable for History {
     fn execute(self) {
         // Implementation will be added later
     }
