@@ -9,6 +9,9 @@ pub struct Configuration {
     pub english_orchestrator_prompt: String,
     pub chinese_orchestrator_prompt: String,
     pub japanese_orchestrator_prompt: String,
+    pub english_naming_prompt: String,
+    pub chinese_naming_prompt: String,
+    pub japanese_naming_prompt: String,
 }
 
 impl Configuration {
@@ -21,6 +24,9 @@ impl Configuration {
             english_orchestrator_prompt: "".into(),
             chinese_orchestrator_prompt: "".into(),
             japanese_orchestrator_prompt: "".into(),
+            english_naming_prompt: "".into(),
+            chinese_naming_prompt: "".into(),
+            japanese_naming_prompt: "".into(),
         }
     }
 

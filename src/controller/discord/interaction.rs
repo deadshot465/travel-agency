@@ -14,8 +14,8 @@ use axum::{
 use command_macros::command_handler;
 use serde_json::json;
 use serenity::all::{
-    CommandData, CommandInteraction, CreateInteractionResponse, CreateInteractionResponseMessage,
-    EditInteractionResponse, EditWebhookMessage,
+    CommandInteraction, CreateInteractionResponse, CreateInteractionResponseMessage, CreateThread,
+    EditInteractionResponse, GuildChannel, Message,
 };
 use std::collections::HashMap;
 use std::future::Future;
@@ -26,8 +26,8 @@ use crate::shared::structs::AppState;
 use crate::shared::structs::agent::{Language, LanguageTriageArgumants, OrchestrationResponse};
 use crate::shared::structs::discord::interaction::{InteractionRequest, InteractionResponse};
 use crate::shared::{
-    DISCORD_INTERACTION_CALLBACK_ENDPOINT, DISCORD_INTERACTION_EDIT_ENDPOINT,
-    DISCORD_ROOT_ENDPOINT, GEMINI_25_PRO, GPT_41,
+    DISCORD_CREATE_THREAD_ENDPOINT, DISCORD_INTERACTION_EDIT_ENDPOINT, DISCORD_ROOT_ENDPOINT,
+    GEMINI_25_FLASH, GEMINI_25_PRO, GPT_41,
 };
 
 type CommandHandler =
@@ -60,11 +60,6 @@ pub async fn handle_interaction(State(app_state): State<AppState>, request: Byte
 
     match serde_json::from_slice::<CommandInteraction>(&bytes) {
         Ok(command_interaction) => {
-            tracing::debug!(
-                "Received incoming command interaction: {:?}",
-                &command_interaction
-            );
-
             tokio::spawn(async move {
                 if let Err(e) = handle_command_interaction(command_interaction, app_state).await {
                     let error_msg = format!("Error when handling command interaction: {:?}", e);
@@ -113,14 +108,12 @@ async fn plan(interaction: CommandInteraction, app_state: AppState) -> anyhow::R
         .unwrap_or_default();
 
     let language = determine_language(&user_prompt, &app_state).await?;
-    tracing::debug!("Triage result: {:?}", language);
 
     let orchestrator_system_prompt = match language {
         Language::Chinese => app_state.config.chinese_orchestrator_prompt.clone(),
         Language::Japanese => app_state.config.japanese_orchestrator_prompt.clone(),
         _ => app_state.config.english_orchestrator_prompt.clone(),
     };
-    tracing::debug!("Orchestrator prompt: {}", &orchestrator_system_prompt);
 
     let orchestration_response =
         orchestrate(&orchestrator_system_prompt, &user_prompt, &app_state).await;
@@ -129,32 +122,8 @@ async fn plan(interaction: CommandInteraction, app_state: AppState) -> anyhow::R
         Err(e) => format!("{:?}", e),
     };
 
-    let callback_url = format!(
-        "{}{}",
-        DISCORD_ROOT_ENDPOINT, DISCORD_INTERACTION_EDIT_ENDPOINT
-    )
-    .replace(
-        "$APPLICATION_ID",
-        interaction.application_id.get().to_string().as_str(),
-    )
-    .replace("$INTERACTION_TOKEN", interaction.token.as_str());
-
-    let edit_content = EditInteractionResponse::new().content(message);
-
-    let request = app_state
-        .http_client
-        .patch(callback_url)
-        .json(&edit_content)
-        .send()
-        .await;
-
-    match request {
-        Ok(res) => tracing::info!("Successfully edit the original response: {:?}", res),
-        Err(e) => {
-            let error_msg = format!("Failed to edit the original response: {:?}", e);
-            tracing::error!("{}", &error_msg);
-        }
-    }
+    let edited_message = send_greeting(&interaction, message, &app_state).await?;
+    let thread = create_thread(&edited_message, language, &app_state).await?;
 
     Ok(())
 }
@@ -330,4 +299,125 @@ fn build_one_shot_messages(
                 .build()?,
         ),
     ])
+}
+
+async fn send_greeting(
+    interaction: &CommandInteraction,
+    message: String,
+    app_state: &AppState,
+) -> anyhow::Result<Message> {
+    let callback_url = format!(
+        "{}{}",
+        DISCORD_ROOT_ENDPOINT, DISCORD_INTERACTION_EDIT_ENDPOINT
+    )
+    .replace(
+        "$APPLICATION_ID",
+        interaction.application_id.get().to_string().as_str(),
+    )
+    .replace("$INTERACTION_TOKEN", interaction.token.as_str());
+
+    let edit_content = EditInteractionResponse::new().content(message);
+
+    let response = app_state
+        .http_client
+        .patch(callback_url)
+        .json(&edit_content)
+        .send()
+        .await;
+
+    match response {
+        Ok(res) => match res.json::<Message>().await {
+            Ok(m) => Ok(m),
+            Err(e) => {
+                let error_msg = format!("Failed to get edited original response: {:?}", e);
+                tracing::error!("{}", &error_msg);
+                Err(anyhow::anyhow!("{}", error_msg))
+            }
+        },
+        Err(e) => {
+            let error_msg = format!("Failed to edit the original response: {:?}", e);
+            tracing::error!("{}", &error_msg);
+            Err(anyhow::anyhow!("{}", error_msg))
+        }
+    }
+}
+
+async fn create_thread(
+    message: &Message,
+    language: Language,
+    app_state: &AppState,
+) -> anyhow::Result<GuildChannel> {
+    let url = format!(
+        "{}{}",
+        DISCORD_ROOT_ENDPOINT, DISCORD_CREATE_THREAD_ENDPOINT
+    )
+    .replace("$CHANNEL_ID", message.channel_id.get().to_string().as_str())
+    .replace("$MESSAGE_ID", message.id.get().to_string().as_str());
+
+    let bot_token = std::env::var("BOT_TOKEN")?;
+
+    let title = name_thread(message, language, app_state).await?;
+
+    let create_thread_args =
+        CreateThread::new(title).auto_archive_duration(serenity::all::AutoArchiveDuration::OneWeek);
+
+    let response = app_state
+        .http_client
+        .post(url)
+        .json(&create_thread_args)
+        .header("Authorization", format!("Bot {}", bot_token))
+        .send()
+        .await;
+
+    match response {
+        Ok(res) => match res.json::<GuildChannel>().await {
+            Ok(c) => Ok(c),
+            Err(e) => {
+                let error_msg =
+                    format!("Failed to get the newly created discussion thread: {:?}", e);
+                tracing::error!("{}", &error_msg);
+                Err(anyhow::anyhow!("{}", error_msg))
+            }
+        },
+        Err(e) => {
+            let error_msg = format!("Failed to create a discussion thread: {:?}", e);
+            tracing::error!("{}", &error_msg);
+            Err(anyhow::anyhow!("{}", error_msg))
+        }
+    }
+}
+
+async fn name_thread(
+    message: &Message,
+    language: Language,
+    app_state: &AppState,
+) -> anyhow::Result<String> {
+    let system_prompt = match language {
+        Language::Chinese => app_state.config.chinese_naming_prompt.clone(),
+        Language::Japanese => app_state.config.japanese_naming_prompt.clone(),
+        _ => app_state.config.english_naming_prompt.clone(),
+    };
+
+    let messages = build_one_shot_messages(&system_prompt, &message.content)?;
+
+    let request = CreateChatCompletionRequestArgs::default()
+        .model(GEMINI_25_FLASH)
+        .temperature(0.7)
+        .messages(messages)
+        .build()?;
+
+    let response = app_state
+        .llm_clients
+        .open_router_client
+        .chat()
+        .create(request)
+        .await
+        .map(|res| {
+            res.choices
+                .first()
+                .and_then(|choice| choice.message.content.clone())
+                .unwrap_or_default()
+        });
+
+    Ok(response?)
 }
