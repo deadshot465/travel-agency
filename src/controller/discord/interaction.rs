@@ -227,7 +227,9 @@ async fn orchestrate(
                                         "type": "string"
                                     }
                                 }
-                            }
+                            },
+                            "required": ["task_id", "agent", "instruction", "dependencies"],
+                            "additionalProperties": false
                         }
                     },
                     "synthesis_plan": {
