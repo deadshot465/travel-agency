@@ -55,19 +55,14 @@ pub trait Taskable {
     ) -> anyhow::Result<ChatChoice>;
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Hash, Default)]
 pub enum Agent {
+    #[default]
     Food,
     Transport,
     History,
     Modern,
     Nature,
-}
-
-impl Default for Agent {
-    fn default() -> Self {
-        Agent::Food
-    }
 }
 
 #[derive(Deserialize, Serialize, Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -162,7 +157,7 @@ impl Display for Agent {
             Agent::Nature => "Nature",
         };
 
-        write!(f, "{}", string)
+        write!(f, "{string}")
     }
 }
 
@@ -174,7 +169,7 @@ impl Display for LanguageModel {
             Default::default()
         };
 
-        write!(f, "{}", model_name)
+        write!(f, "{model_name}")
     }
 }
 
@@ -197,7 +192,7 @@ impl Taskable for Executor {
 
             if dependencies
                 .iter()
-                .all(|task_id| context_keys.contains(&task_id))
+                .all(|task_id| context_keys.contains(task_id))
             {
                 break;
             }
@@ -209,7 +204,7 @@ impl Taskable for Executor {
             .map(|c| (c.key().clone(), c.value().content.clone()))
             .collect::<HashMap<_, _>>();
 
-        let context = if context.len() > 0 {
+        let context = if !context.is_empty() {
             serde_json::to_string_pretty(&context)?
         } else {
             "".into()
@@ -224,7 +219,7 @@ impl Taskable for Executor {
         tracing::debug!("Subtask user prompt: {}", &subtask_user_prompt);
 
         for entry in MODEL_NAME_MAP.iter() {
-            let (model, model_name) = (entry.key().clone(), entry.value().clone());
+            let (model, model_name) = (*entry.key(), entry.value().clone());
             let request = build_llm_request(model, model_name.clone(), messages.clone())?;
             let llm_clients_clone = llm_clients.clone();
             let system_prompt_clone = self.system_prompt.clone();
@@ -317,8 +312,7 @@ impl Taskable for Executor {
                 match result {
                     Ok(res) => (model, res),
                     Err(e) => {
-                        let error_msg =
-                            format!("Failed to get response from model {}: {:?}", model, e);
+                        let error_msg = format!("Failed to get response from model {model}: {e:?}");
                         tracing::error!("{}", &error_msg);
                         (model, error_msg)
                     }
@@ -353,7 +347,7 @@ impl Taskable for Executor {
             .messages(messages)
             .build()?;
 
-        let result = llm_clients
+        llm_clients
             .open_router_client
             .chat()
             .create(request)
@@ -364,9 +358,7 @@ impl Taskable for Executor {
                     .first()
                     .cloned()
                     .ok_or(anyhow::anyhow!("Failed to generate a response from model."))
-            });
-
-        result
+            })
     }
 }
 

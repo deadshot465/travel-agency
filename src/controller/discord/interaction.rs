@@ -71,7 +71,7 @@ pub async fn handle_interaction(State(app_state): State<AppState>, request: Byte
         Ok(command_interaction) => {
             tokio::spawn(async move {
                 if let Err(e) = handle_command_interaction(command_interaction, app_state).await {
-                    let error_msg = format!("Error when handling command interaction: {:?}", e);
+                    let error_msg = format!("Error when handling command interaction: {e:?}");
                     tracing::error!("{}", error_msg);
                 }
             });
@@ -90,7 +90,7 @@ pub async fn handle_interaction(State(app_state): State<AppState>, request: Byte
                 }
             }
             Err(e) => {
-                let error_message = format!("Failed to deserialize incoming payload: {}", e);
+                let error_message = format!("Failed to deserialize incoming payload: {e:?}");
                 tracing::error!("{}", &error_message);
                 StatusCode::BAD_REQUEST.into_response()
             }
@@ -128,7 +128,7 @@ async fn plan(interaction: CommandInteraction, app_state: AppState) -> anyhow::R
         orchestrate(&orchestrator_system_prompt, &user_prompt, &app_state).await;
     let (message, orchestration) = match orchestration_response {
         Ok(response) => (response.greeting_message.clone(), response),
-        Err(e) => (format!("{:?}", e), OrchestrationPlan::default()),
+        Err(e) => (format!("{e:?}"), OrchestrationPlan::default()),
     };
 
     let mut plan_record = PlanRecord {
@@ -163,10 +163,8 @@ async fn plan(interaction: CommandInteraction, app_state: AppState) -> anyhow::R
                 && let Some(ref original_desc) = original_embed.description
             {
                 let mut new_embed = original_embed.clone();
-                new_embed.description = Some(format!(
-                    "{}\n🔄 Synthesizing final result...",
-                    original_desc
-                ));
+                new_embed.description =
+                    Some(format!("{original_desc}\n🔄 Synthesizing final result..."));
 
                 let edit_message_args = EditMessage::new().embed(CreateEmbed::from(new_embed));
 
@@ -251,7 +249,7 @@ async fn determine_language(user_prompt: &str, app_state: &AppState) -> anyhow::
             Ok(serde_json::from_str::<LanguageTriageArguments>(&arguments)?.language)
         }
         Err(e) => {
-            let error_msg = format!("Failed to call OpenAI API: {:?}. Fall back to English.", e);
+            let error_msg = format!("Failed to call OpenAI API: {e:?}. Fall back to English.");
             tracing::error!("{}", error_msg);
             Ok(Language::English)
         }
@@ -341,7 +339,7 @@ async fn orchestrate(
             Ok(orchestration_plan)
         }
         Err(e) => {
-            let error_msg = format!("Error when creating orchestration tasks: {:?}", e);
+            let error_msg = format!("Error when creating orchestration tasks: {e:?}");
             tracing::error!("{}", &error_msg);
             Err(anyhow::anyhow!("{}", error_msg))
         }
@@ -363,7 +361,7 @@ async fn send_greeting(
     match response {
         Ok(message) => Ok(message),
         Err(e) => {
-            let error_msg = format!("Failed to edit the original response: {:?}", e);
+            let error_msg = format!("Failed to edit the original response: {e:?}");
             tracing::error!("{}", &error_msg);
             Err(anyhow::anyhow!("{}", error_msg))
         }
@@ -388,7 +386,7 @@ async fn create_thread(
     match response {
         Ok(guild_channel) => Ok(guild_channel),
         Err(e) => {
-            let error_msg = format!("Failed to create a discussion thread: {:?}", e);
+            let error_msg = format!("Failed to create a discussion thread: {e:?}");
             tracing::error!("{}", &error_msg);
             Err(anyhow::anyhow!("{}", error_msg))
         }
@@ -572,7 +570,7 @@ async fn execute_plan(
         .join_all()
         .await
         .into_iter()
-        .filter_map(|opt| opt)
+        .flatten()
         .collect::<Vec<_>>();
 
     Ok((Some(message_mutex), results))
@@ -773,7 +771,7 @@ async fn insert_record(
         .await;
 
     if let Err(e) = result {
-        let error_msg = format!("Failed to create document in Firestore: {:?}", e);
+        let error_msg = format!("Failed to create document in Firestore: {e:?}");
         tracing::error!("{}", &error_msg);
         return Err(anyhow::anyhow!("{}", error_msg));
     }
@@ -794,7 +792,7 @@ async fn insert_record(
         .await;
 
     if let Err(e) = result {
-        let error_msg = format!("Failed to create plan mapping in Firestore: {:?}", e);
+        let error_msg = format!("Failed to create plan mapping in Firestore: {e:?}");
         tracing::error!("{}", &error_msg);
         return Err(anyhow::anyhow!("{}", error_msg));
     }

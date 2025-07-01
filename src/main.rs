@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use axum::{Router, middleware::from_fn, routing::post};
 use firestore::{FirestoreDb, FirestoreDbOptions};
-use serenity::all::Http;
+use serenity::all::{ApplicationId, Http};
 use tracing::Level;
 
 use crate::{
@@ -33,17 +33,14 @@ async fn main() -> anyhow::Result<()> {
         .finish();
 
     if let Err(e) = tracing::subscriber::set_global_default(subscriber) {
-        eprintln!(
-            "Initialization of tracing subscriber failed with error: {}",
-            e
-        );
+        eprintln!("Initialization of tracing subscriber failed with error: {e}");
     }
 
     let available_commands = COMMAND_REGISTRY
         .lock()
         .await
-        .iter()
-        .map(|(cmd_name, _func)| cmd_name.clone())
+        .keys()
+        .cloned()
         .collect::<Vec<_>>();
 
     tracing::info!("Available commands: {:?}", &available_commands);
@@ -56,11 +53,16 @@ async fn main() -> anyhow::Result<()> {
 
     let sa_path = Configuration::config_directory()?.join(std::env::var("SA_FILE_NAME")?);
 
+    let discord_http = Arc::new(Http::new(&bot_token));
+    discord_http.set_application_id(ApplicationId::new(
+        std::env::var("APPLICATION_ID")?.parse::<u64>()?,
+    ));
+
     let app_state = AppState {
         config: Configuration::load_from_config_file()?,
         llm_clients: LLMClients::new(),
         http_client: reqwest::Client::builder().user_agent(USER_AGENT).build()?,
-        http: Arc::new(Http::new(&bot_token)),
+        http: discord_http,
         firestore_db: FirestoreDb::with_options_service_account_key_file(
             FirestoreDbOptions::new(std::env::var("PROJECT_ID")?),
             sa_path,
@@ -75,7 +77,7 @@ async fn main() -> anyhow::Result<()> {
 
     let server_bind_point = std::env::var("SERVER_BIND_POINT")?;
     let port = std::env::var("PORT")?;
-    let server_bind_point = format!("{}:{}", server_bind_point, port);
+    let server_bind_point = format!("{server_bind_point}:{port}");
 
     let listener = tokio::net::TcpListener::bind(&server_bind_point).await?;
     axum::serve(listener, app).await?;

@@ -43,7 +43,7 @@ async fn buffer_request_body(
         .collect()
         .await
         .map_err(|e| {
-            let error_msg = format!("Internal server error when collecting body bytes: {}", e);
+            let error_msg = format!("Internal server error when collecting body bytes: {e:?}");
             tracing::error!("{}", &error_msg);
             (axum::http::StatusCode::INTERNAL_SERVER_ERROR, error_msg).into_response()
         })?
@@ -55,6 +55,7 @@ async fn buffer_request_body(
     }
 }
 
+#[allow(clippy::result_large_err)]
 fn validate(bytes: Bytes, signature: String, timestamp: String) -> Result<Bytes, Response> {
     let public_key =
         std::env::var("APPLICATION_PUBLIC_KEY").expect("Failed to get application public key.");
@@ -63,7 +64,7 @@ fn validate(bytes: Bytes, signature: String, timestamp: String) -> Result<Bytes,
 
     match String::from_utf8(body) {
         Ok(s) => {
-            let message = format!("{}{}", timestamp, s);
+            let message = format!("{timestamp}{s}");
 
             let signature_bytes =
                 hex::decode(&signature).expect("Failed to decode public key from hex value.");
@@ -82,14 +83,14 @@ fn validate(bytes: Bytes, signature: String, timestamp: String) -> Result<Bytes,
                     }
                 }
                 Err(e) => {
-                    let error_msg = format!("Failed to verify: {:?}", e);
+                    let error_msg = format!("Failed to verify: {e:?}");
                     tracing::error!("{}", &error_msg);
                     Err((axum::http::StatusCode::INTERNAL_SERVER_ERROR, error_msg).into_response())
                 }
             }
         }
         Err(e) => {
-            let error_msg = format!("Failed to build string from UTF-8 encoded body: {}", e);
+            let error_msg = format!("Failed to build string from UTF-8 encoded body: {e:?}");
             tracing::error!("{}", &error_msg);
             Err((axum::http::StatusCode::INTERNAL_SERVER_ERROR, error_msg).into_response())
         }

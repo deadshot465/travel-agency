@@ -24,8 +24,5 @@ pub fn build_one_shot_messages(
 
 pub fn create_avatar_url(id: u64, image_hash: ImageHash) -> String {
     let hash = image_hash.to_string();
-    format!(
-        "https://cdn.discordapp.com/avatars/{}/{}.webp?size=1024",
-        id, hash
-    )
+    format!("https://cdn.discordapp.com/avatars/{id}/{hash}.webp?size=1024")
 }
