@@ -4,7 +4,7 @@ use async_openai::types::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use serenity::all::GuildChannel;
+use serenity::all::ChannelId;
 use uuid::Uuid;
 
 #[derive(Deserialize, Serialize, Clone, Debug)]
@@ -29,7 +29,7 @@ pub struct Message {
 #[derive(Deserialize, Serialize, Debug, Clone)]
 pub struct PlanMapping {
     pub plan_id: Uuid,
-    pub thread_id: GuildChannel,
+    pub thread_id: ChannelId,
 }
 
 impl Message {

@@ -3,8 +3,6 @@ use std::{collections::HashMap, fmt::Display, sync::Arc};
 use async_openai::types::{
     ChatChoice, ChatCompletionRequestMessage, ChatCompletionRequestProvider,
     CreateChatCompletionRequest, CreateChatCompletionRequestArgs, CreateChatCompletionResponse,
-    ReasoningEffort,
-    responses::{Content, CreateResponseArgs, Input, OutputContent, ReasoningConfigArgs},
 };
 use async_trait::async_trait;
 use dashmap::DashMap;
@@ -14,8 +12,8 @@ use tokio::task::JoinSet;
 
 use crate::shared::{
     CHAT_GPT_4O_LATEST, DEEP_SEEK_R1, DEEP_SEEK_V3, DOUBAO_SEED_16, GEMINI_25_PRO, GLM_4_PLUS,
-    GPT_41, GROK_3, KIMI_LATEST, MINIMAX_M1, MISTRAL_LARGE, O3_PRO, OPUS_4, QWEN_MAX, SONNET_4,
-    STEP_2_16K, TEMPERATURE_HIGH, TEMPERATURE_LOW, TEMPERATURE_MEDIUM, structs::LLMClients,
+    GPT_41, GROK_3, KIMI_LATEST, MINIMAX_M1, MISTRAL_LARGE, OPUS_4, QWEN_MAX, SONNET_4, STEP_2_16K,
+    TEMPERATURE_HIGH, TEMPERATURE_LOW, TEMPERATURE_MEDIUM, structs::LLMClients,
     utility::build_one_shot_messages,
 };
 
@@ -27,7 +25,6 @@ pub static MODEL_NAME_MAP: Lazy<DashMap<LanguageModel, String>> = Lazy::new(|| {
     [
         (LanguageModel::ChatGPT4o, CHAT_GPT_4O_LATEST.into()),
         (LanguageModel::GPT41, GPT_41.into()),
-        (LanguageModel::O3Pro, O3_PRO.into()),
         (LanguageModel::Sonnet4, SONNET_4.into()),
         (LanguageModel::Opus4, OPUS_4.into()),
         (LanguageModel::Gemini25Pro, GEMINI_25_PRO.into()),
@@ -78,7 +75,6 @@ pub enum LanguageModel {
     // OpenAI
     ChatGPT4o,
     GPT41,
-    O3Pro,
     // Anthropic
     Sonnet4,
     Opus4,
@@ -222,8 +218,6 @@ impl Taskable for Executor {
             let (model, model_name) = (*entry.key(), entry.value().clone());
             let request = build_llm_request(model, model_name.clone(), messages.clone())?;
             let llm_clients_clone = llm_clients.clone();
-            let system_prompt_clone = self.system_prompt.clone();
-            let user_prompt_clone = subtask_user_prompt.clone();
             let agent_type = self.agent_type;
 
             join_set.spawn(async move {
@@ -267,40 +261,6 @@ impl Taskable for Executor {
                             .create(request)
                             .await
                             .map(extract_response_content)
-                    }
-                    LanguageModel::O3Pro => {
-                        let mut args = CreateResponseArgs::default();
-
-                        let mut reasoning_config_args = ReasoningConfigArgs::default();
-                        let reasoning_config = reasoning_config_args
-                            .effort(ReasoningEffort::High)
-                            .build()
-                            .expect("Failed to build reasoning config.");
-
-                        let request = args
-                            .model(O3_PRO)
-                            .instructions(system_prompt_clone)
-                            .temperature(TEMPERATURE_HIGH)
-                            .input(Input::Text(user_prompt_clone))
-                            .reasoning(reasoning_config)
-                            .build()
-                            .expect("Failed to create response.");
-
-                        llm_clients_clone
-                            .openai_client
-                            .responses()
-                            .create(request)
-                            .await
-                            .map(|res| {
-                                if let Some(OutputContent::Message(m)) = res.output.first()
-                                    && let Some(output) = m.content.first()
-                                    && let Content::OutputText(text) = output
-                                {
-                                    text.text.clone()
-                                } else {
-                                    String::new()
-                                }
-                            })
                     }
                     _ => llm_clients_clone
                         .open_router_clients

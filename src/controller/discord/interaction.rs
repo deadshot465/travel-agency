@@ -179,14 +179,9 @@ async fn plan(interaction: CommandInteraction, app_state: AppState) -> anyhow::R
 
         let final_result = synthesize(language, results, &mut plan_record, &app_state).await?;
 
-        let message_args = CreateMessage::new().content(final_result);
+        insert_record(plan_record, thread.id, &app_state).await?;
 
-        let _ = app_state
-            .http
-            .send_message(thread.id, vec![], &message_args)
-            .await?;
-
-        insert_record(plan_record, thread, &app_state).await?;
+        send_final_result_message(final_result, thread.id, &app_state).await?;
     }
 
     Ok(())
@@ -760,7 +755,7 @@ async fn synthesize(
 
 async fn insert_record(
     plan_record: PlanRecord,
-    thread: GuildChannel,
+    thread_id: ChannelId,
     app_state: &AppState,
 ) -> anyhow::Result<()> {
     let record_id = plan_record.id.to_string();
@@ -783,7 +778,7 @@ async fn insert_record(
 
     let mapping = PlanMapping {
         plan_id: plan_record.id,
-        thread_id: thread,
+        thread_id,
     };
 
     let result = app_state
@@ -800,6 +795,44 @@ async fn insert_record(
         let error_msg = format!("Failed to create plan mapping in Firestore: {e:?}");
         tracing::error!("{}", &error_msg);
         return Err(anyhow::anyhow!("{}", error_msg));
+    }
+
+    Ok(())
+}
+
+async fn send_final_result_message(
+    mut final_result: String,
+    thread_id: ChannelId,
+    app_state: &AppState,
+) -> anyhow::Result<()> {
+    let mut character_count = final_result.chars().count();
+    let messages = if character_count > 1000 {
+        let mut container = vec![];
+
+        while character_count > 0 {
+            if character_count >= 1000 {
+                let drained = final_result.chars().take(1000).collect::<String>();
+                container.push(drained);
+                final_result = final_result.chars().skip(1000).collect();
+                character_count = final_result.chars().count();
+            } else {
+                container.push(final_result.clone());
+                character_count = 0;
+            }
+        }
+
+        container
+    } else {
+        vec![final_result]
+    };
+
+    for message in messages.into_iter() {
+        let message_args = CreateMessage::new().content(message);
+
+        let _ = app_state
+            .http
+            .send_message(thread_id, vec![], &message_args)
+            .await?;
     }
 
     Ok(())
