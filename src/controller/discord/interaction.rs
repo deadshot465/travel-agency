@@ -326,7 +326,9 @@ async fn orchestrate(
 
     let response = app_state
         .llm_clients
-        .open_router_client
+        .open_router_clients
+        .get(&Agent::default())
+        .expect("Failed to get the Open Router client for orchestration.")
         .chat()
         .create(request)
         .await;
@@ -414,7 +416,9 @@ async fn name_thread(
 
     let response = app_state
         .llm_clients
-        .open_router_client
+        .open_router_clients
+        .get(&Agent::default())
+        .expect("Failed to get the Open Router client for renaming thread.")
         .chat()
         .create(request)
         .await
@@ -445,10 +449,7 @@ async fn execute_plan(
     let icon_url = create_avatar_url(app_info.id.get(), icon_hash);
 
     let description = format!(
-        r#"- Analysis: {}
-    - Number of tasks: {}
-    
-    🚀 Executing tasks..."#,
+        "- Analysis: {}\n- Number of tasks: {}\n\n🚀 Executing tasks...",
         &orchestration.analysis,
         orchestration.tasks.len()
     );
@@ -481,7 +482,7 @@ async fn execute_plan(
             {
                 let mut new_embed = original_embed.clone();
                 new_embed.description = Some(format!(
-                    "{}\nExecuting {} with {}...",
+                    "{}\nExecuting {} with {} Agent...",
                     original_desc,
                     executor.task_id.clone(),
                     executor.agent_type
@@ -564,6 +565,8 @@ async fn execute_plan(
                 }
             }
         });
+
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
     }
 
     let results = join_set
@@ -727,7 +730,9 @@ async fn synthesize(
 
     let response = app_state
         .llm_clients
-        .open_router_client
+        .open_router_clients
+        .get(&Agent::default())
+        .expect("Failed to get the Open Router client for synthesis.")
         .chat()
         .create(request)
         .await;

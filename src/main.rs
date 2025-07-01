@@ -60,7 +60,7 @@ async fn main() -> anyhow::Result<()> {
 
     let app_state = AppState {
         config: Configuration::load_from_config_file()?,
-        llm_clients: LLMClients::new(),
+        llm_clients: Arc::new(LLMClients::new()),
         http_client: reqwest::Client::builder().user_agent(USER_AGENT).build()?,
         http: discord_http,
         firestore_db: FirestoreDb::with_options_service_account_key_file(

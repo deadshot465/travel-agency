@@ -1,9 +1,10 @@
 use std::sync::Arc;
 
 use async_openai::config::OpenAIConfig;
+use dashmap::DashMap;
 use serenity::all::Http;
 
-use crate::shared::structs::config::Configuration;
+use crate::shared::structs::{agent::Agent, config::Configuration};
 
 pub mod agent;
 pub mod config;
@@ -19,7 +20,7 @@ const DEEP_SEEK_BASE_URL: &str = "https://api.deepseek.com";
 #[derive(Debug, Clone)]
 pub struct AppState {
     pub config: Configuration,
-    pub llm_clients: LLMClients,
+    pub llm_clients: Arc<LLMClients>,
     pub http_client: reqwest::Client,
     pub http: Arc<Http>,
     pub firestore_db: firestore::FirestoreDb,
@@ -27,7 +28,7 @@ pub struct AppState {
 
 #[derive(Debug, Clone)]
 pub struct LLMClients {
-    pub open_router_client: async_openai::Client<OpenAIConfig>,
+    pub open_router_clients: DashMap<Agent, async_openai::Client<OpenAIConfig>>,
     pub openai_client: async_openai::Client<OpenAIConfig>,
     pub volc_engine_client: async_openai::Client<OpenAIConfig>,
     pub moonshot_client: async_openai::Client<OpenAIConfig>,
@@ -42,11 +43,27 @@ impl LLMClients {
             OpenAIConfig::new().with_api_key(std::env::var("OPENAI_API_KEY").unwrap_or_default());
         let openai_client = async_openai::Client::with_config(openai_config);
 
+        let open_router_clients = DashMap::new();
+        let agents = [
+            Agent::Food,
+            Agent::History,
+            Agent::Modern,
+            Agent::Nature,
+            Agent::Transport,
+        ];
+
+        for agent in agents.into_iter() {
+            open_router_clients.insert(
+                agent,
+                Self::initialize_compatible_client(
+                    OPEN_ROUTER_BASE_URL,
+                    std::env::var("OPEN_ROUTER_API_KEY").unwrap_or_default(),
+                ),
+            );
+        }
+
         LLMClients {
-            open_router_client: Self::initialize_compatible_client(
-                OPEN_ROUTER_BASE_URL,
-                std::env::var("OPEN_ROUTER_API_KEY").unwrap_or_default(),
-            ),
+            open_router_clients,
             openai_client,
             volc_engine_client: Self::initialize_compatible_client(
                 VOLC_ENGINE_BASE_URL,

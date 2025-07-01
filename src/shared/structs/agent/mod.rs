@@ -51,7 +51,7 @@ pub trait Taskable {
     async fn execute(
         &mut self,
         contexts: Arc<DashMap<TaskId, Context>>,
-        llm_clients: LLMClients,
+        llm_clients: Arc<LLMClients>,
     ) -> anyhow::Result<ChatChoice>;
 }
 
@@ -178,7 +178,7 @@ impl Taskable for Executor {
     async fn execute(
         &mut self,
         contexts: Arc<DashMap<TaskId, Context>>,
-        llm_clients: LLMClients,
+        llm_clients: Arc<LLMClients>,
     ) -> anyhow::Result<ChatChoice> {
         let dependencies = self.dependencies.clone();
 
@@ -224,6 +224,7 @@ impl Taskable for Executor {
             let llm_clients_clone = llm_clients.clone();
             let system_prompt_clone = self.system_prompt.clone();
             let user_prompt_clone = subtask_user_prompt.clone();
+            let agent_type = self.agent_type;
 
             join_set.spawn(async move {
                 let result = match model {
@@ -302,7 +303,9 @@ impl Taskable for Executor {
                             })
                     }
                     _ => llm_clients_clone
-                        .open_router_client
+                        .open_router_clients
+                        .get(&agent_type)
+                        .expect("Failed to get the Open Router client for the agent.")
                         .chat()
                         .create(request)
                         .await
@@ -348,7 +351,9 @@ impl Taskable for Executor {
             .build()?;
 
         llm_clients
-            .open_router_client
+            .open_router_clients
+            .get(&self.agent_type)
+            .expect("Failed to get the Open Router client for the agent.")
             .chat()
             .create(request)
             .await
