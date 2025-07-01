@@ -1,8 +1,7 @@
 use async_openai::types::{
-    ChatCompletionRequestMessage, ChatCompletionRequestSystemMessageArgs,
-    ChatCompletionRequestUserMessageArgs, ChatCompletionToolArgs, ChatCompletionToolChoiceOption,
-    ChatCompletionToolType, CreateChatCompletionRequestArgs, FunctionObjectArgs, ResponseFormat,
-    ResponseFormatJsonSchema,
+    ChatCompletionRequestMessage, ChatCompletionRequestUserMessageArgs, ChatCompletionToolArgs,
+    ChatCompletionToolChoiceOption, ChatCompletionToolType, CreateChatCompletionRequestArgs,
+    FunctionObjectArgs, ResponseFormat, ResponseFormatJsonSchema, Role,
 };
 use axum::body::Bytes;
 use axum::http::StatusCode;
@@ -12,22 +11,32 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use command_macros::command_handler;
+use dashmap::DashMap;
 use serde_json::json;
 use serenity::all::{
-    CommandInteraction, CreateInteractionResponse, CreateInteractionResponseMessage, CreateThread,
-    EditInteractionResponse, GuildChannel, Message,
+    ChannelId, CommandInteraction, CreateEmbed, CreateEmbedAuthor, CreateInteractionResponse,
+    CreateInteractionResponseMessage, CreateMessage, CreateThread, EditInteractionResponse,
+    EditMessage, GuildChannel, Message,
 };
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 use tokio::sync::Mutex;
+use tokio::task::JoinSet;
 
 use crate::shared::structs::AppState;
-use crate::shared::structs::agent::{Language, LanguageTriageArgumants, OrchestrationResponse};
+use crate::shared::structs::agent::record::{Content, PlanRecord};
+use crate::shared::structs::agent::record::{Message as RecordMessage, PlanMapping};
+use crate::shared::structs::agent::{
+    Agent, Context, Executor, FinalResult, Language, LanguageTriageArguments, OrchestrationPlan,
+    Task, Taskable,
+};
 use crate::shared::structs::discord::interaction::{InteractionRequest, InteractionResponse};
+use crate::shared::utility::{build_one_shot_messages, create_avatar_url};
 use crate::shared::{
-    DISCORD_CREATE_THREAD_ENDPOINT, DISCORD_INTERACTION_EDIT_ENDPOINT, DISCORD_ROOT_ENDPOINT,
-    GEMINI_25_FLASH, GEMINI_25_PRO, GPT_41,
+    EMBED_COLOR, GEMINI_25_FLASH, GEMINI_25_PRO, GPT_41, PLAN_COLLECTION_NAME,
+    PLAN_MAPPING_COLLECTION_NAME, TEMPERATURE_LOW, TEMPERATURE_MEDIUM,
 };
 
 type CommandHandler =
@@ -110,20 +119,77 @@ async fn plan(interaction: CommandInteraction, app_state: AppState) -> anyhow::R
     let language = determine_language(&user_prompt, &app_state).await?;
 
     let orchestrator_system_prompt = match language {
-        Language::Chinese => app_state.config.chinese_orchestrator_prompt.clone(),
-        Language::Japanese => app_state.config.japanese_orchestrator_prompt.clone(),
-        _ => app_state.config.english_orchestrator_prompt.clone(),
+        Language::Chinese => app_state.config.chinese.orchestrator.prompt.clone(),
+        Language::Japanese => app_state.config.japanese.orchestrator.prompt.clone(),
+        _ => app_state.config.english.orchestrator.prompt.clone(),
     };
 
     let orchestration_response =
         orchestrate(&orchestrator_system_prompt, &user_prompt, &app_state).await;
-    let message = match orchestration_response {
-        Ok(response) => response.greeting_message.clone(),
-        Err(e) => format!("{:?}", e),
+    let (message, orchestration) = match orchestration_response {
+        Ok(response) => (response.greeting_message.clone(), response),
+        Err(e) => (format!("{:?}", e), OrchestrationPlan::default()),
+    };
+
+    let mut plan_record = PlanRecord {
+        id: uuid::Uuid::now_v7(),
+        messages: vec![
+            RecordMessage {
+                role: Role::System,
+                content: Content::Plain(orchestrator_system_prompt.clone()),
+            },
+            RecordMessage {
+                role: Role::User,
+                content: Content::Plain(user_prompt.clone()),
+            },
+            RecordMessage {
+                role: Role::Assistant,
+                content: Content::Dynamic(serde_json::to_value(&orchestration)?),
+            },
+        ],
     };
 
     let edited_message = send_greeting(&interaction, message, &app_state).await?;
     let thread = create_thread(&edited_message, language, &app_state).await?;
+
+    let (maybe_message, results) =
+        execute_plan(orchestration, language, thread.id, &app_state).await?;
+
+    if let Some(message_mutex) = maybe_message {
+        {
+            let mut message = message_mutex.lock().await;
+
+            if let Some(original_embed) = message.embeds.first()
+                && let Some(ref original_desc) = original_embed.description
+            {
+                let mut new_embed = original_embed.clone();
+                new_embed.description = Some(format!(
+                    "{}\n🔄 Synthesizing final result...",
+                    original_desc
+                ));
+
+                let edit_message_args = EditMessage::new().embed(CreateEmbed::from(new_embed));
+
+                let new_message = app_state
+                    .http
+                    .edit_message(message.channel_id, message.id, &edit_message_args, vec![])
+                    .await?;
+
+                *message = new_message;
+            }
+        }
+
+        let final_result = synthesize(language, results, &mut plan_record, &app_state).await?;
+
+        let message_args = CreateMessage::new().content(final_result);
+
+        let _ = app_state
+            .http
+            .send_message(thread.id, vec![], &message_args)
+            .await?;
+
+        insert_record(plan_record, thread, &app_state).await?;
+    }
 
     Ok(())
 }
@@ -157,7 +223,7 @@ async fn determine_language(user_prompt: &str, app_state: &AppState) -> anyhow::
     let request = CreateChatCompletionRequestArgs::default()
         .model(GPT_41)
         .messages(messages)
-        .temperature(0.3)
+        .temperature(TEMPERATURE_LOW)
         .tools(vec![tool])
         .tool_choice(ChatCompletionToolChoiceOption::Required)
         .build()?;
@@ -182,7 +248,7 @@ async fn determine_language(user_prompt: &str, app_state: &AppState) -> anyhow::
                     })
                     .unwrap_or_default();
 
-            Ok(serde_json::from_str::<LanguageTriageArgumants>(&arguments)?.language)
+            Ok(serde_json::from_str::<LanguageTriageArguments>(&arguments)?.language)
         }
         Err(e) => {
             let error_msg = format!("Failed to call OpenAI API: {:?}. Fall back to English.", e);
@@ -196,14 +262,13 @@ async fn orchestrate(
     system_prompt: &str,
     user_prompt: &str,
     app_state: &AppState,
-) -> anyhow::Result<OrchestrationResponse> {
+) -> anyhow::Result<OrchestrationPlan> {
     let messages = build_one_shot_messages(system_prompt, user_prompt)?;
-    tracing::debug!("One shot message: {:?}", &messages);
 
     let request = CreateChatCompletionRequestArgs::default()
         .model(GEMINI_25_PRO)
         .messages(messages)
-        .temperature(0.3)
+        .temperature(TEMPERATURE_LOW)
         .response_format(ResponseFormat::JsonSchema { json_schema: ResponseFormatJsonSchema {
             description: Some("Break the user's request into subtasks and orchestrate in order to get the final result.".into()),
             name: "orchestrate_tasks".into(),
@@ -271,9 +336,9 @@ async fn orchestrate(
     match response {
         Ok(res) => {
             let content = res.choices[0].message.content.clone().unwrap_or_default();
-            let orchestration_response = serde_json::from_str::<OrchestrationResponse>(&content)?;
-            tracing::info!("Orchestration response: {:?}", &orchestration_response);
-            Ok(orchestration_response)
+            let orchestration_plan = serde_json::from_str::<OrchestrationPlan>(&content)?;
+            tracing::info!("Orchestration response: {:?}", &orchestration_plan);
+            Ok(orchestration_plan)
         }
         Err(e) => {
             let error_msg = format!("Error when creating orchestration tasks: {:?}", e);
@@ -283,57 +348,20 @@ async fn orchestrate(
     }
 }
 
-fn build_one_shot_messages(
-    system_prompt: &str,
-    user_prompt: &str,
-) -> anyhow::Result<Vec<ChatCompletionRequestMessage>> {
-    Ok(vec![
-        ChatCompletionRequestMessage::System(
-            ChatCompletionRequestSystemMessageArgs::default()
-                .content(system_prompt)
-                .build()?,
-        ),
-        ChatCompletionRequestMessage::User(
-            ChatCompletionRequestUserMessageArgs::default()
-                .content(user_prompt)
-                .build()?,
-        ),
-    ])
-}
-
 async fn send_greeting(
     interaction: &CommandInteraction,
     message: String,
     app_state: &AppState,
 ) -> anyhow::Result<Message> {
-    let callback_url = format!(
-        "{}{}",
-        DISCORD_ROOT_ENDPOINT, DISCORD_INTERACTION_EDIT_ENDPOINT
-    )
-    .replace(
-        "$APPLICATION_ID",
-        interaction.application_id.get().to_string().as_str(),
-    )
-    .replace("$INTERACTION_TOKEN", interaction.token.as_str());
-
     let edit_content = EditInteractionResponse::new().content(message);
 
     let response = app_state
-        .http_client
-        .patch(callback_url)
-        .json(&edit_content)
-        .send()
+        .http
+        .edit_original_interaction_response(&interaction.token, &edit_content, Vec::new())
         .await;
 
     match response {
-        Ok(res) => match res.json::<Message>().await {
-            Ok(m) => Ok(m),
-            Err(e) => {
-                let error_msg = format!("Failed to get edited original response: {:?}", e);
-                tracing::error!("{}", &error_msg);
-                Err(anyhow::anyhow!("{}", error_msg))
-            }
-        },
+        Ok(message) => Ok(message),
         Err(e) => {
             let error_msg = format!("Failed to edit the original response: {:?}", e);
             tracing::error!("{}", &error_msg);
@@ -347,38 +375,18 @@ async fn create_thread(
     language: Language,
     app_state: &AppState,
 ) -> anyhow::Result<GuildChannel> {
-    let url = format!(
-        "{}{}",
-        DISCORD_ROOT_ENDPOINT, DISCORD_CREATE_THREAD_ENDPOINT
-    )
-    .replace("$CHANNEL_ID", message.channel_id.get().to_string().as_str())
-    .replace("$MESSAGE_ID", message.id.get().to_string().as_str());
-
-    let bot_token = std::env::var("BOT_TOKEN")?;
-
     let title = name_thread(message, language, app_state).await?;
 
     let create_thread_args =
         CreateThread::new(title).auto_archive_duration(serenity::all::AutoArchiveDuration::OneWeek);
 
     let response = app_state
-        .http_client
-        .post(url)
-        .json(&create_thread_args)
-        .header("Authorization", format!("Bot {}", bot_token))
-        .send()
+        .http
+        .create_thread_from_message(message.channel_id, message.id, &create_thread_args, None)
         .await;
 
     match response {
-        Ok(res) => match res.json::<GuildChannel>().await {
-            Ok(c) => Ok(c),
-            Err(e) => {
-                let error_msg =
-                    format!("Failed to get the newly created discussion thread: {:?}", e);
-                tracing::error!("{}", &error_msg);
-                Err(anyhow::anyhow!("{}", error_msg))
-            }
-        },
+        Ok(guild_channel) => Ok(guild_channel),
         Err(e) => {
             let error_msg = format!("Failed to create a discussion thread: {:?}", e);
             tracing::error!("{}", &error_msg);
@@ -393,16 +401,16 @@ async fn name_thread(
     app_state: &AppState,
 ) -> anyhow::Result<String> {
     let system_prompt = match language {
-        Language::Chinese => app_state.config.chinese_naming_prompt.clone(),
-        Language::Japanese => app_state.config.japanese_naming_prompt.clone(),
-        _ => app_state.config.english_naming_prompt.clone(),
+        Language::Chinese => app_state.config.chinese.naming.prompt.clone(),
+        Language::Japanese => app_state.config.japanese.naming.prompt.clone(),
+        _ => app_state.config.english.naming.prompt.clone(),
     };
 
     let messages = build_one_shot_messages(&system_prompt, &message.content)?;
 
     let request = CreateChatCompletionRequestArgs::default()
         .model(GEMINI_25_FLASH)
-        .temperature(0.7)
+        .temperature(TEMPERATURE_MEDIUM)
         .messages(messages)
         .build()?;
 
@@ -420,4 +428,376 @@ async fn name_thread(
         });
 
     Ok(response?)
+}
+
+async fn execute_plan(
+    orchestration: OrchestrationPlan,
+    language: Language,
+    discussion_thread_id: ChannelId,
+    app_state: &AppState,
+) -> anyhow::Result<(Option<Arc<Mutex<Message>>>, Vec<Context>)> {
+    if orchestration.tasks.is_empty() {
+        return Ok((None, vec![]));
+    }
+
+    let app_info = app_state.http.get_current_application_info().await?;
+    let icon_hash = app_info
+        .icon
+        .expect("Failed to get application's icon hash.");
+    let icon_url = create_avatar_url(app_info.id.get(), icon_hash);
+
+    let description = format!(
+        r#"- Analysis: {}
+    - Number of tasks: {}
+    
+    🚀 Executing tasks..."#,
+        &orchestration.analysis,
+        orchestration.tasks.len()
+    );
+
+    let message_args = CreateMessage::new().embed(
+        CreateEmbed::new()
+            .author(CreateEmbedAuthor::new(&app_info.name).icon_url(icon_url))
+            .color(EMBED_COLOR)
+            .description(description)
+            .title("Execution Plan"),
+    );
+
+    let embed_message = app_state
+        .http
+        .send_message(discussion_thread_id, Vec::new(), &message_args)
+        .await?;
+
+    let message_mutex = Arc::new(tokio::sync::Mutex::new(embed_message));
+
+    let executors = create_executors(&orchestration.tasks, language, app_state);
+
+    let mut join_set = JoinSet::new();
+    let contexts = Arc::new(DashMap::new());
+
+    for mut executor in executors.into_iter() {
+        {
+            let mut message = message_mutex.lock().await;
+            if let Some(original_embed) = message.embeds.first()
+                && let Some(ref original_desc) = original_embed.description
+            {
+                let mut new_embed = original_embed.clone();
+                new_embed.description = Some(format!(
+                    "{}\nExecuting {} with {}...",
+                    original_desc,
+                    executor.task_id.clone(),
+                    executor.agent_type
+                ));
+
+                let edit_message_args = EditMessage::new().embed(CreateEmbed::from(new_embed));
+
+                let new_message = app_state
+                    .http
+                    .edit_message(message.channel_id, message.id, &edit_message_args, vec![])
+                    .await?;
+
+                *message = new_message;
+            }
+        }
+
+        let llm_clients_clone = app_state.llm_clients.clone();
+        let contexts_clone = contexts.clone();
+        let task_id = executor.task_id.clone();
+        let message_mutex_clone = message_mutex.clone();
+        let http_clone = app_state.http.clone();
+
+        join_set.spawn(async move {
+            let clone = contexts_clone.clone();
+
+            match executor.execute(clone, llm_clients_clone).await {
+                Ok(choice) => {
+                    if let Some(ref content) = choice.message.content {
+                        contexts_clone.insert(
+                            task_id.clone(),
+                            Context {
+                                task_id: task_id.clone(),
+                                agent_type: executor.agent_type,
+                                content: content.clone(),
+                            },
+                        );
+
+                        let mut message = message_mutex_clone.lock().await;
+
+                        if let Some(original_embed) = message.embeds.first()
+                            && let Some(ref original_desc) = original_embed.description
+                        {
+                            let mut new_embed = original_embed.clone();
+                            new_embed.description = Some(format!(
+                                "{}\n✅ {} completed.",
+                                original_desc,
+                                task_id.clone()
+                            ));
+
+                            let edit_message_args =
+                                EditMessage::new().embed(CreateEmbed::from(new_embed));
+
+                            let new_message = http_clone
+                                .edit_message(
+                                    message.channel_id,
+                                    message.id,
+                                    &edit_message_args,
+                                    vec![],
+                                )
+                                .await
+                                .expect("Failed to update message.");
+
+                            *message = new_message;
+                        }
+                    }
+
+                    choice.message.content.map(|s| Context {
+                        task_id,
+                        agent_type: executor.agent_type,
+                        content: s,
+                    })
+                }
+                Err(e) => {
+                    let error_msg = format!(
+                        "Failed to get a response from agent {}: {:?}",
+                        executor.agent_type, e
+                    );
+                    tracing::error!("{}", &error_msg);
+                    None
+                }
+            }
+        });
+    }
+
+    let results = join_set
+        .join_all()
+        .await
+        .into_iter()
+        .filter_map(|opt| opt)
+        .collect::<Vec<_>>();
+
+    Ok((Some(message_mutex), results))
+}
+
+fn create_executors(tasks: &[Task], language: Language, app_state: &AppState) -> Vec<Executor> {
+    let prompt_map = build_prompt_map(app_state);
+
+    tasks
+        .iter()
+        .map(|task| Executor {
+            task_id: task.task_id.clone(),
+            system_prompt: prompt_map[&language][&task.agent].0.clone(),
+            user_prompt: prompt_map[&language][&task.agent]
+                .1
+                .replace("$INSTRUCTION", &task.instruction),
+            agent_type: task.agent,
+            agent_prompt: prompt_map[&language][&task.agent].2.clone(),
+            dependencies: task.dependencies.clone(),
+        })
+        .collect()
+}
+
+fn build_prompt_map(
+    app_state: &AppState,
+) -> HashMap<Language, HashMap<Agent, (String, String, String)>> {
+    let languages = [Language::Chinese, Language::Japanese, Language::English];
+    let agent_types = [
+        Agent::Food,
+        Agent::History,
+        Agent::Modern,
+        Agent::Nature,
+        Agent::Transport,
+    ];
+
+    let language_map = [
+        (Language::Chinese, &app_state.config.chinese),
+        (Language::Japanese, &app_state.config.japanese),
+        (Language::English, &app_state.config.english),
+    ]
+    .into_iter()
+    .collect::<HashMap<_, _>>();
+
+    let mut prompt_map = HashMap::new();
+
+    for language in languages.into_iter() {
+        let entry = prompt_map.entry(language).or_insert(HashMap::new());
+
+        for agent in agent_types.into_iter() {
+            match agent {
+                Agent::Food => {
+                    entry.insert(agent, &language_map[&language].food);
+                }
+                Agent::Transport => {
+                    entry.insert(agent, &language_map[&language].transport);
+                }
+                Agent::History => {
+                    entry.insert(agent, &language_map[&language].history);
+                }
+                Agent::Modern => {
+                    entry.insert(agent, &language_map[&language].modern);
+                }
+                Agent::Nature => {
+                    entry.insert(agent, &language_map[&language].nature);
+                }
+            }
+        }
+    }
+
+    prompt_map
+        .into_iter()
+        .map(|(k, v)| {
+            let new_v = v
+                .into_iter()
+                .map(|(inner_k, inner_v)| {
+                    (
+                        inner_k,
+                        (
+                            inner_v.system_prompt.clone(),
+                            inner_v.user_prompt.clone(),
+                            language_map[&k].agent.prompt.clone(),
+                        ),
+                    )
+                })
+                .collect::<HashMap<_, _>>();
+
+            (k, new_v)
+        })
+        .collect()
+}
+
+async fn synthesize(
+    language: Language,
+    results: Vec<Context>,
+    plan_record: &mut PlanRecord,
+    app_state: &AppState,
+) -> anyhow::Result<String> {
+    let synthesis_prompt = match language {
+        Language::Chinese => app_state.config.chinese.synthesis.prompt.clone(),
+        Language::Japanese => app_state.config.japanese.synthesis.prompt.clone(),
+        _ => app_state.config.english.synthesis.prompt.clone(),
+    };
+
+    let results = results
+        .into_iter()
+        .map(|c| (c.task_id.clone(), c))
+        .collect::<HashMap<_, _>>();
+
+    let synthesis_prompt =
+        synthesis_prompt.replace("$RESULTS", &serde_json::to_string_pretty(&results)?);
+
+    tracing::debug!("Synthesis prompt: {:?}", &synthesis_prompt);
+
+    let mut messages = plan_record
+        .messages
+        .iter()
+        .map(|m| {
+            m.to_openai_message()
+                .expect("Failed to convert plan record to OpenAI message.")
+        })
+        .collect::<Vec<_>>();
+
+    messages.push(ChatCompletionRequestMessage::User(
+        ChatCompletionRequestUserMessageArgs::default()
+            .content(synthesis_prompt.as_str())
+            .build()?,
+    ));
+
+    plan_record.messages.push(RecordMessage {
+        role: Role::User,
+        content: Content::Plain(synthesis_prompt.clone()),
+    });
+
+    let request = CreateChatCompletionRequestArgs::default()
+        .model(GEMINI_25_PRO)
+        .temperature(TEMPERATURE_LOW)
+        .messages(messages)
+        .response_format(ResponseFormat::JsonSchema { json_schema: ResponseFormatJsonSchema {
+            description: Some("Synthesize the results of subtasks into the final response.".into()),
+            name: "synthesize_tasks".into(),
+            schema: Some(json!({
+                "type": "object",
+                "properties": {
+                    "final_result": {
+                        "type": "string",
+                        "description": "The combined and synthesized result to respond to the user's request."
+                    }
+                },
+                "required": ["final_result"],
+                "additionalProperties": false
+            })),
+            strict: Some(true) } })
+        .build()?;
+
+    let response = app_state
+        .llm_clients
+        .open_router_client
+        .chat()
+        .create(request)
+        .await;
+
+    match response {
+        Ok(res) => {
+            let content = res.choices[0].message.content.clone().unwrap_or_default();
+            let final_result = serde_json::from_str::<FinalResult>(&content)?;
+
+            plan_record.messages.push(RecordMessage {
+                role: Role::Assistant,
+                content: Content::Dynamic(serde_json::to_value(&final_result)?),
+            });
+
+            tracing::info!("Final result: {:?}", &final_result);
+            Ok(final_result.final_result)
+        }
+        Err(e) => {
+            let error_msg = format!("Failed to get final result via API: {:?}", &e);
+            tracing::error!("{}", &error_msg);
+            Err(anyhow::anyhow!("{}", error_msg))
+        }
+    }
+}
+
+async fn insert_record(
+    plan_record: PlanRecord,
+    thread: GuildChannel,
+    app_state: &AppState,
+) -> anyhow::Result<()> {
+    let record_id = plan_record.id.to_string();
+
+    let result = app_state
+        .firestore_db
+        .fluent()
+        .insert()
+        .into(PLAN_COLLECTION_NAME)
+        .document_id(record_id.as_str())
+        .object(&plan_record)
+        .execute::<PlanRecord>()
+        .await;
+
+    if let Err(e) = result {
+        let error_msg = format!("Failed to create document in Firestore: {:?}", e);
+        tracing::error!("{}", &error_msg);
+        return Err(anyhow::anyhow!("{}", error_msg));
+    }
+
+    let mapping = PlanMapping {
+        plan_id: plan_record.id,
+        thread_id: thread,
+    };
+
+    let result = app_state
+        .firestore_db
+        .fluent()
+        .insert()
+        .into(PLAN_MAPPING_COLLECTION_NAME)
+        .document_id(record_id.as_str())
+        .object(&mapping)
+        .execute::<PlanMapping>()
+        .await;
+
+    if let Err(e) = result {
+        let error_msg = format!("Failed to create plan mapping in Firestore: {:?}", e);
+        tracing::error!("{}", &error_msg);
+        return Err(anyhow::anyhow!("{}", error_msg));
+    }
+
+    Ok(())
 }

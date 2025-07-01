@@ -1,4 +1,8 @@
+use std::sync::Arc;
+
 use axum::{Router, middleware::from_fn, routing::post};
+use firestore::{FirestoreDb, FirestoreDbOptions};
+use serenity::all::Http;
 use tracing::Level;
 
 use crate::{
@@ -44,10 +48,24 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::info!("Available commands: {:?}", &available_commands);
 
+    let bot_token = std::env::var("BOT_TOKEN")?;
+
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("Failed to initialize TLS.");
+
+    let sa_path = Configuration::config_directory()?.join(std::env::var("SA_FILE_NAME")?);
+
     let app_state = AppState {
         config: Configuration::load_from_config_file()?,
         llm_clients: LLMClients::new(),
         http_client: reqwest::Client::builder().user_agent(USER_AGENT).build()?,
+        http: Arc::new(Http::new(&bot_token)),
+        firestore_db: FirestoreDb::with_options_service_account_key_file(
+            FirestoreDbOptions::new(std::env::var("PROJECT_ID")?),
+            sa_path,
+        )
+        .await?,
     };
 
     let app = Router::new()

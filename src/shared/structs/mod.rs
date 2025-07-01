@@ -1,4 +1,7 @@
+use std::sync::Arc;
+
 use async_openai::config::OpenAIConfig;
+use serenity::all::Http;
 
 use crate::shared::structs::config::Configuration;
 
@@ -18,6 +21,8 @@ pub struct AppState {
     pub config: Configuration,
     pub llm_clients: LLMClients,
     pub http_client: reqwest::Client,
+    pub http: Arc<Http>,
+    pub firestore_db: firestore::FirestoreDb,
 }
 
 #[derive(Debug, Clone)]
