@@ -26,11 +26,11 @@ use tokio::sync::Mutex;
 use tokio::task::JoinSet;
 
 use crate::shared::structs::AppState;
-use crate::shared::structs::agent::record::{Content, PlanRecord};
+use crate::shared::structs::agent::record::{Content, GenerationDump, PlanRecord};
 use crate::shared::structs::agent::record::{Message as RecordMessage, PlanMapping};
 use crate::shared::structs::agent::{
-    Agent, Context, Executor, FinalResult, Language, LanguageTriageArguments, OrchestrationPlan,
-    Task, Taskable,
+    Agent, Context, Executor, FinalResult, Language, LanguageModel, LanguageTriageArguments,
+    OrchestrationPlan, Task, Taskable,
 };
 use crate::shared::structs::discord::interaction::{InteractionRequest, InteractionResponse};
 use crate::shared::utility::{build_one_shot_messages, create_avatar_url};
@@ -147,13 +147,23 @@ async fn plan(interaction: CommandInteraction, app_state: AppState) -> anyhow::R
                 content: Content::Dynamic(serde_json::to_value(&orchestration)?),
             },
         ],
+        dumps: vec![GenerationDump {
+            model: LanguageModel::Gemini25Pro,
+            content: orchestration.to_string(),
+        }],
     };
 
     let edited_message = send_greeting(&interaction, message, &app_state).await?;
     let thread = create_thread(&edited_message, language, &app_state).await?;
 
-    let (maybe_message, results) =
-        execute_plan(orchestration, language, thread.id, &app_state).await?;
+    let (maybe_message, results) = execute_plan(
+        orchestration,
+        language,
+        thread.id,
+        &mut plan_record,
+        &app_state,
+    )
+    .await?;
 
     if let Some(message_mutex) = maybe_message {
         {
@@ -431,6 +441,7 @@ async fn execute_plan(
     orchestration: OrchestrationPlan,
     language: Language,
     discussion_thread_id: ChannelId,
+    plan_record: &mut PlanRecord,
     app_state: &AppState,
 ) -> anyhow::Result<(Option<Arc<Mutex<Message>>>, Vec<Context>)> {
     if orchestration.tasks.is_empty() {
@@ -504,7 +515,7 @@ async fn execute_plan(
             let clone = contexts_clone.clone();
 
             match executor.execute(clone, llm_clients_clone).await {
-                Ok(choice) => {
+                Ok((choice, dumps)) => {
                     if let Some(ref content) = choice.message.content {
                         contexts_clone.insert(
                             task_id.clone(),
@@ -544,11 +555,19 @@ async fn execute_plan(
                         }
                     }
 
-                    choice.message.content.map(|s| Context {
-                        task_id,
-                        agent_type: executor.agent_type,
-                        content: s,
-                    })
+                    let generation_dumps = {
+                        let dumps_lock = dumps.lock().await;
+                        dumps_lock.clone()
+                    };
+
+                    (
+                        choice.message.content.map(|s| Context {
+                            task_id,
+                            agent_type: executor.agent_type,
+                            content: s,
+                        }),
+                        generation_dumps,
+                    )
                 }
                 Err(e) => {
                     let error_msg = format!(
@@ -556,7 +575,7 @@ async fn execute_plan(
                         executor.agent_type, e
                     );
                     tracing::error!("{}", &error_msg);
-                    None
+                    (None, vec![])
                 }
             }
         });
@@ -564,10 +583,19 @@ async fn execute_plan(
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
     }
 
-    let results = join_set
-        .join_all()
-        .await
+    let results = join_set.join_all().await;
+
+    let mut dumps = results
+        .iter()
+        .map(|(_ctx, d)| (*d).clone())
+        .flatten()
+        .collect::<Vec<_>>();
+
+    plan_record.dumps.append(&mut dumps);
+
+    let results = results
         .into_iter()
+        .map(|(ctx, _d)| ctx)
         .flatten()
         .collect::<Vec<_>>();
 
@@ -740,6 +768,11 @@ async fn synthesize(
             plan_record.messages.push(RecordMessage {
                 role: Role::Assistant,
                 content: Content::Dynamic(serde_json::to_value(&final_result)?),
+            });
+
+            plan_record.dumps.push(GenerationDump {
+                model: LanguageModel::Gemini25Pro,
+                content: final_result.to_string(),
             });
 
             tracing::info!("Final result: {:?}", &final_result);

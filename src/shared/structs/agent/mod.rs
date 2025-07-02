@@ -8,18 +8,21 @@ use async_trait::async_trait;
 use dashmap::DashMap;
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
-use tokio::task::JoinSet;
+use tokio::{sync::Mutex, task::JoinSet};
 
 use crate::shared::{
     CHAT_GPT_4O_LATEST, DEEP_SEEK_R1, DEEP_SEEK_V3, DOUBAO_SEED_16, GEMINI_25_PRO, GLM_4_PLUS,
-    GPT_41, GROK_3, KIMI_LATEST, MINIMAX_M1, MISTRAL_LARGE, OPUS_4, QWEN_MAX, SONNET_4, STEP_2_16K,
-    TEMPERATURE_HIGH, TEMPERATURE_LOW, TEMPERATURE_MEDIUM, structs::LLMClients,
+    GPT_41, GROK_3, KIMI_LATEST, MINIMAX_M1, MISTRAL_LARGE, OPUS_4, QWEN_MAX, SONNET_4,
+    TEMPERATURE_HIGH, TEMPERATURE_LOW, TEMPERATURE_MEDIUM,
+    structs::{LLMClients, agent::record::GenerationDump},
     utility::build_one_shot_messages,
 };
 
 pub mod record;
 
 pub type TaskId = String;
+
+pub const DEFAULT_SUBTASK_TIMEOUT: u64 = 60 * 10;
 
 pub static MODEL_NAME_MAP: Lazy<DashMap<LanguageModel, String>> = Lazy::new(|| {
     [
@@ -32,7 +35,7 @@ pub static MODEL_NAME_MAP: Lazy<DashMap<LanguageModel, String>> = Lazy::new(|| {
         (LanguageModel::DeepSeekV3, DEEP_SEEK_V3.into()),
         (LanguageModel::DeepSeekR1, DEEP_SEEK_R1.into()),
         (LanguageModel::GLM4Plus, GLM_4_PLUS.into()),
-        (LanguageModel::Step216k, STEP_2_16K.into()),
+        // (LanguageModel::Step216k, STEP_2_16K.into()),
         (LanguageModel::QwenMax, QWEN_MAX.into()),
         (LanguageModel::DoubaoSeed16, DOUBAO_SEED_16.into()),
         (LanguageModel::KimiLatest, KIMI_LATEST.into()),
@@ -49,7 +52,7 @@ pub trait Taskable {
         &mut self,
         contexts: Arc<DashMap<TaskId, Context>>,
         llm_clients: Arc<LLMClients>,
-    ) -> anyhow::Result<ChatChoice>;
+    ) -> anyhow::Result<(ChatChoice, Arc<Mutex<Vec<GenerationDump>>>)>;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Hash, Default)]
@@ -70,7 +73,7 @@ pub enum Language {
     Other,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize)]
 pub enum LanguageModel {
     // OpenAI
     ChatGPT4o,
@@ -169,13 +172,43 @@ impl Display for LanguageModel {
     }
 }
 
+impl Display for OrchestrationPlan {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}",
+            serde_json::to_string_pretty(self).unwrap_or_default()
+        )
+    }
+}
+
+impl Display for Task {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}",
+            serde_json::to_string_pretty(self).unwrap_or_default()
+        )
+    }
+}
+
+impl Display for FinalResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}",
+            serde_json::to_string_pretty(self).unwrap_or_default()
+        )
+    }
+}
+
 #[async_trait]
 impl Taskable for Executor {
     async fn execute(
         &mut self,
         contexts: Arc<DashMap<TaskId, Context>>,
         llm_clients: Arc<LLMClients>,
-    ) -> anyhow::Result<ChatChoice> {
+    ) -> anyhow::Result<(ChatChoice, Arc<Mutex<Vec<GenerationDump>>>)> {
         let dependencies = self.dependencies.clone();
 
         loop {
@@ -214,68 +247,80 @@ impl Taskable for Executor {
 
         tracing::debug!("Subtask user prompt: {}", &subtask_user_prompt);
 
+        let generation_dumps = Arc::new(Mutex::new(Vec::new()));
+
         for entry in MODEL_NAME_MAP.iter() {
             let (model, model_name) = (*entry.key(), entry.value().clone());
             let request = build_llm_request(model, model_name.clone(), messages.clone())?;
             let llm_clients_clone = llm_clients.clone();
             let agent_type = self.agent_type;
+            let dumps = generation_dumps.clone();
 
             join_set.spawn(async move {
+                let open_router_client = llm_clients_clone
+                    .open_router_clients
+                    .get(&agent_type)
+                    .expect("Failed to get the Open Router client for the agent.");
+
                 let result = match model {
                     m if m == LanguageModel::ChatGPT4o || m == LanguageModel::GPT41 => {
-                        llm_clients_clone
-                            .openai_client
-                            .chat()
-                            .create(request)
-                            .await
-                            .map(extract_response_content)
+                        let chat = llm_clients_clone.openai_client.chat();
+                        let future = chat.create(request);
+                        tokio::time::timeout(std::time::Duration::from_secs(DEFAULT_SUBTASK_TIMEOUT), future).await
                     }
-                    LanguageModel::DoubaoSeed16 => llm_clients_clone
-                        .volc_engine_client
-                        .chat()
-                        .create(request)
-                        .await
-                        .map(extract_response_content),
-                    LanguageModel::GLM4Plus => llm_clients_clone
-                        .zhipu_client
-                        .chat()
-                        .create(request)
-                        .await
-                        .map(extract_response_content),
-                    LanguageModel::KimiLatest => llm_clients_clone
-                        .moonshot_client
-                        .chat()
-                        .create(request)
-                        .await
-                        .map(extract_response_content),
-                    LanguageModel::Step216k => llm_clients_clone
-                        .step_fun_client
-                        .chat()
-                        .create(request)
-                        .await
-                        .map(extract_response_content),
+                    LanguageModel::DoubaoSeed16 => {
+                        let chat = llm_clients_clone.volc_engine_client.chat();
+                        let future = chat.create(request);
+                        tokio::time::timeout(std::time::Duration::from_secs(DEFAULT_SUBTASK_TIMEOUT), future).await
+                    }
+                    LanguageModel::GLM4Plus => {
+                        let chat = llm_clients_clone.zhipu_client.chat();
+                        let future = chat.create(request);
+                        tokio::time::timeout(std::time::Duration::from_secs(DEFAULT_SUBTASK_TIMEOUT), future).await
+                    }
+                    LanguageModel::KimiLatest => {
+                        let chat = llm_clients_clone.moonshot_client.chat();
+                        let future = chat.create(request);
+                        tokio::time::timeout(std::time::Duration::from_secs(DEFAULT_SUBTASK_TIMEOUT), future).await
+                    }
+                    LanguageModel::Step216k => {
+                        let chat = llm_clients_clone.step_fun_client.chat();
+                        let future = chat.create(request);
+                        tokio::time::timeout(std::time::Duration::from_secs(DEFAULT_SUBTASK_TIMEOUT), future).await
+                    }
                     m if m == LanguageModel::DeepSeekV3 || m == LanguageModel::DeepSeekR1 => {
-                        llm_clients_clone
-                            .deepseek_client
-                            .chat()
-                            .create(request)
-                            .await
-                            .map(extract_response_content)
+                        let chat = llm_clients_clone.deepseek_client.chat();
+                        let future = chat.create(request);
+                        tokio::time::timeout(std::time::Duration::from_secs(DEFAULT_SUBTASK_TIMEOUT), future).await
                     }
-                    _ => llm_clients_clone
-                        .open_router_clients
-                        .get(&agent_type)
-                        .expect("Failed to get the Open Router client for the agent.")
-                        .chat()
-                        .create(request)
-                        .await
-                        .map(extract_response_content),
+                    _ => {
+                        let chat = open_router_client.chat();
+                        let future = chat.create(request);
+                        tokio::time::timeout(std::time::Duration::from_secs(DEFAULT_SUBTASK_TIMEOUT), future).await
+                    }
                 };
 
                 match result {
-                    Ok(res) => (model, res),
-                    Err(e) => {
-                        let error_msg = format!("Failed to get response from model {model}: {e:?}");
+                    Ok(res) => match res {
+                        Ok(r) => {
+                            tracing::info!("{model} has completed a {agent_type} task.");
+                            let extracted = extract_response_content(r);
+
+                            {
+                                let mut dumps_lock = dumps.lock().await;
+                                dumps_lock.push(GenerationDump { model, content: extracted.clone() });
+                            }
+
+                            (model, extracted)
+                        },
+                        Err(e) => {
+                            let error_msg = format!("Failed to get response from model {model} when trying to complete a {agent_type} task: {e:?}");
+                            tracing::error!("{}", &error_msg);
+                            (model, error_msg)
+                        }
+                    },
+                    Err(_e) => {
+                        let error_msg = format!("{model} timed out when trying to complete a {agent_type} task.");
                         tracing::error!("{}", &error_msg);
                         (model, error_msg)
                     }
@@ -317,11 +362,12 @@ impl Taskable for Executor {
             .chat()
             .create(request)
             .await
-            .map_err(|e| anyhow::anyhow!("{:?}", e))
+            .map_err(|e| anyhow::anyhow!("{e:?}"))
             .and_then(|res| {
                 res.choices
                     .first()
                     .cloned()
+                    .map(|c| (c, generation_dumps))
                     .ok_or(anyhow::anyhow!("Failed to generate a response from model."))
             })
     }
