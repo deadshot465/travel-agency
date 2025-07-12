@@ -29,7 +29,6 @@ async fn main() -> anyhow::Result<()> {
 
     let subscriber = tracing_subscriber::FmtSubscriber::builder()
         .with_max_level(log_level)
-        .pretty()
         .finish();
 
     if let Err(e) = tracing::subscriber::set_global_default(subscriber) {
@@ -68,6 +67,9 @@ async fn main() -> anyhow::Result<()> {
             sa_path,
         )
         .await?,
+        google_maps_client: Arc::new(::google_maps::Client::try_new(std::env::var(
+            "GOOGLE_API_KEY",
+        )?)?),
     };
 
     let app = Router::new()

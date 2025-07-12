@@ -9,6 +9,7 @@ use crate::shared::structs::{agent::Agent, config::Configuration};
 pub mod agent;
 pub mod config;
 pub mod discord;
+pub mod google_maps;
 
 const OPEN_ROUTER_BASE_URL: &str = "https://openrouter.ai/api/v1";
 const VOLC_ENGINE_BASE_URL: &str = "https://ark.cn-beijing.volces.com/api/v3";
@@ -24,6 +25,7 @@ pub struct AppState {
     pub http_client: reqwest::Client,
     pub http: Arc<Http>,
     pub firestore_db: firestore::FirestoreDb,
+    pub google_maps_client: Arc<::google_maps::Client>,
 }
 
 #[derive(Debug, Clone)]

@@ -1,8 +1,7 @@
 use std::{collections::HashMap, fmt::Display, sync::Arc};
 
 use async_openai::types::{
-    ChatChoice, ChatCompletionRequestMessage, ChatCompletionRequestProvider,
-    CreateChatCompletionRequest, CreateChatCompletionRequestArgs, CreateChatCompletionResponse,
+    ChatChoice, ChatCompletionRequestMessage, ChatCompletionRequestProvider, ChatCompletionTool, ChatCompletionToolChoiceOption, CreateChatCompletionRequest, CreateChatCompletionRequestArgs, CreateChatCompletionResponse
 };
 use async_trait::async_trait;
 use dashmap::DashMap;
@@ -11,9 +10,9 @@ use serde::{Deserialize, Serialize};
 use tokio::{sync::Mutex, task::JoinSet};
 
 use crate::shared::{
-    CHAT_GPT_4O_LATEST, DEEP_SEEK_R1, DEEP_SEEK_V3, DOUBAO_SEED_16, GEMINI_25_PRO, GLM_4_PLUS,
-    GPT_41, GROK_3, KIMI_LATEST, MINIMAX_M1, MISTRAL_LARGE, OPUS_4, QWEN_MAX, SONNET_4,
-    TEMPERATURE_HIGH, TEMPERATURE_LOW, TEMPERATURE_MEDIUM,
+    CHAT_GPT_4O_LATEST, DEEP_SEEK_R1, DEEP_SEEK_V3, DOUBAO_SEED_16, ERNIE_45_300B_A47B,
+    GEMINI_25_PRO, GLM_4_PLUS, GPT_41, GROK_3, GROK_4, KIMI_LATEST, MISTRAL_LARGE, OPUS_4,
+    QWEN_3_235B_A22B, QWEN_MAX, SONNET_4, TEMPERATURE_HIGH, TEMPERATURE_LOW, TEMPERATURE_MEDIUM,
     structs::{LLMClients, agent::record::GenerationDump},
     utility::build_one_shot_messages,
 };
@@ -32,15 +31,18 @@ pub static MODEL_NAME_MAP: Lazy<DashMap<LanguageModel, String>> = Lazy::new(|| {
         (LanguageModel::Opus4, OPUS_4.into()),
         (LanguageModel::Gemini25Pro, GEMINI_25_PRO.into()),
         (LanguageModel::Grok3, GROK_3.into()),
+        (LanguageModel::Grok4, GROK_4.into()),
         (LanguageModel::DeepSeekV3, DEEP_SEEK_V3.into()),
         (LanguageModel::DeepSeekR1, DEEP_SEEK_R1.into()),
         (LanguageModel::GLM4Plus, GLM_4_PLUS.into()),
         // (LanguageModel::Step216k, STEP_2_16K.into()),
         (LanguageModel::QwenMax, QWEN_MAX.into()),
+        (LanguageModel::Qwen3235BA22B, QWEN_3_235B_A22B.into()),
         (LanguageModel::DoubaoSeed16, DOUBAO_SEED_16.into()),
         (LanguageModel::KimiLatest, KIMI_LATEST.into()),
         (LanguageModel::MistralLarge, MISTRAL_LARGE.into()),
-        (LanguageModel::MiniMaxM1, MINIMAX_M1.into()),
+        // (LanguageModel::MiniMaxM1, MINIMAX_M1.into()),
+        (LanguageModel::Ernie45300BA47B, ERNIE_45_300B_A47B.into()),
     ]
     .into_iter()
     .collect::<DashMap<_, _>>()
@@ -85,6 +87,7 @@ pub enum LanguageModel {
     Gemini25Pro,
     // xAI
     Grok3,
+    Grok4,
     // DeepSeek
     DeepSeekV3,
     DeepSeekR1,
@@ -94,6 +97,7 @@ pub enum LanguageModel {
     Step216k,
     // Qwen
     QwenMax,
+    Qwen3235BA22B,
     // Doubao
     DoubaoSeed16,
     // Kimi
@@ -102,6 +106,8 @@ pub enum LanguageModel {
     MistralLarge,
     // MiniMax
     MiniMaxM1,
+    // Baidu Ernie
+    Ernie45300BA47B,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -132,6 +138,8 @@ pub struct Executor {
     pub agent_type: Agent,
     pub agent_prompt: String,
     pub dependencies: Vec<TaskId>,
+    pub transport_agent: Option<String>,
+    pub get_transit_time_tool: Option<ChatCompletionTool>,
 }
 
 #[derive(Deserialize, Serialize, Debug, Clone)]
@@ -339,9 +347,18 @@ impl Taskable for Executor {
 
         let results_dump = serde_json::to_string_pretty(&results)?;
 
+        let transport_agent_prompt = if let Some(ref p) = self.transport_agent {
+            p.clone()
+        } else {
+            "".into()
+        };
+
         self.user_prompt = self.user_prompt.replace(
             "$AGENT",
-            &self.agent_prompt.replace("$RESULTS", &results_dump),
+            self.agent_prompt
+                .replace("$RESULTS", &results_dump)
+                .replace("$AGENT_TRANSPORT", &transport_agent_prompt)
+                .trim(),
         );
 
         tracing::info!("Agent system prompt: {}", &self.system_prompt);
@@ -349,18 +366,26 @@ impl Taskable for Executor {
 
         let messages = build_one_shot_messages(&self.system_prompt, &self.user_prompt)?;
 
-        let request = CreateChatCompletionRequestArgs::default()
+        let mut request = CreateChatCompletionRequestArgs::default();
+        request
             .model(SONNET_4)
             .temperature(TEMPERATURE_MEDIUM)
-            .messages(messages)
-            .build()?;
+            .messages(messages);
+
+        if self.agent_type == Agent::Transport
+            && let Some(ref tool) = self.get_transit_time_tool
+        {
+            request
+                .tools(vec![tool.clone()])
+                .tool_choice(ChatCompletionToolChoiceOption::Required);
+        }
 
         llm_clients
             .open_router_clients
             .get(&self.agent_type)
             .expect("Failed to get the Open Router client for the agent.")
             .chat()
-            .create(request)
+            .create(request.build()?)
             .await
             .map_err(|e| anyhow::anyhow!("{e:?}"))
             .and_then(|res| {

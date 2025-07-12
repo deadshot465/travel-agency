@@ -24,6 +24,7 @@ pub struct Language {
     pub transport: PromptPair,
     pub agent: Prompt,
     pub synthesis: Prompt,
+    pub transport_agent: Prompt,
 }
 
 #[derive(Deserialize, Serialize, Debug, Clone, Default)]

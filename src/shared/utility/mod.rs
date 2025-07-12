@@ -4,6 +4,8 @@ use async_openai::types::{
 };
 use serenity::all::ImageHash;
 
+pub mod google_maps;
+
 pub fn build_one_shot_messages(
     system_prompt: &str,
     user_prompt: &str,

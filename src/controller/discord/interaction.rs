@@ -1,7 +1,10 @@
 use async_openai::types::{
-    ChatCompletionRequestMessage, ChatCompletionRequestUserMessageArgs, ChatCompletionToolArgs,
+    ChatChoice, ChatCompletionMessageToolCall, ChatCompletionRequestAssistantMessageArgs,
+    ChatCompletionRequestMessage, ChatCompletionRequestToolMessageArgs,
+    ChatCompletionRequestToolMessageContent, ChatCompletionRequestUserMessageArgs,
+    ChatCompletionResponseMessage, ChatCompletionTool, ChatCompletionToolArgs,
     ChatCompletionToolChoiceOption, ChatCompletionToolType, CreateChatCompletionRequestArgs,
-    FunctionObjectArgs, ResponseFormat, ResponseFormatJsonSchema, Role,
+    FinishReason, FunctionObjectArgs, ResponseFormat, ResponseFormatJsonSchema, Role,
 };
 use axum::body::Bytes;
 use axum::http::StatusCode;
@@ -25,7 +28,6 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::task::JoinSet;
 
-use crate::shared::structs::AppState;
 use crate::shared::structs::agent::record::{Content, GenerationDump, PlanRecord};
 use crate::shared::structs::agent::record::{Message as RecordMessage, PlanMapping};
 use crate::shared::structs::agent::{
@@ -33,14 +35,19 @@ use crate::shared::structs::agent::{
     OrchestrationPlan, Task, Taskable,
 };
 use crate::shared::structs::discord::interaction::{InteractionRequest, InteractionResponse};
+use crate::shared::structs::google_maps::{RouteWithDuration, TransferPlan};
+use crate::shared::structs::{AppState, LLMClients};
+use crate::shared::utility::google_maps::{get_latitude_and_longitude, get_travel_time};
 use crate::shared::utility::{build_one_shot_messages, create_avatar_url};
 use crate::shared::{
     EMBED_COLOR, GEMINI_25_FLASH, GEMINI_25_PRO, GPT_41, PLAN_COLLECTION_NAME,
-    PLAN_MAPPING_COLLECTION_NAME, TEMPERATURE_LOW, TEMPERATURE_MEDIUM,
+    PLAN_MAPPING_COLLECTION_NAME, SONNET_4, TEMPERATURE_LOW, TEMPERATURE_MEDIUM,
 };
 
 type CommandHandler =
     fn(CommandInteraction, AppState) -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send>>;
+
+type PromptMap = HashMap<Language, HashMap<Agent, (String, String, String, String)>>;
 
 lazy_static::lazy_static! {
     pub static ref COMMAND_REGISTRY: Mutex<HashMap<String, CommandHandler>> = Mutex::new(HashMap::new());
@@ -510,11 +517,12 @@ async fn execute_plan(
         let task_id = executor.task_id.clone();
         let message_mutex_clone = message_mutex.clone();
         let http_clone = app_state.http.clone();
+        let google_maps_client_clone = app_state.google_maps_client.clone();
 
         join_set.spawn(async move {
             let clone = contexts_clone.clone();
 
-            match executor.execute(clone, llm_clients_clone).await {
+            match executor.execute(clone, llm_clients_clone.clone()).await {
                 Ok((choice, dumps)) => {
                     if let Some(ref content) = choice.message.content {
                         contexts_clone.insert(
@@ -560,14 +568,57 @@ async fn execute_plan(
                         dumps_lock.clone()
                     };
 
-                    (
-                        choice.message.content.map(|s| Context {
+                    let context = match executor.agent_type {
+                        Agent::Transport => {
+                            if let Some(reason) = choice.finish_reason
+                                && reason == FinishReason::ToolCalls
+                                && let Some(tool_call) = choice
+                                    .message
+                                    .tool_calls
+                                    .as_ref()
+                                    .and_then(|v| v.first().cloned())
+                            {
+                                let results = handle_tool_call(
+                                    tool_call.clone(),
+                                    language,
+                                    google_maps_client_clone,
+                                )
+                                .await
+                                .expect("Failed to handle tool calls.");
+                                let assistant_message = choice.message.clone();
+
+                                let final_message = build_transport_agent_final_message(
+                                    &executor.system_prompt,
+                                    &executor.user_prompt,
+                                    assistant_message,
+                                    results,
+                                    executor.get_transit_time_tool.clone(),
+                                    llm_clients_clone,
+                                )
+                                .await
+                                .expect("Failed to build final message for transport agent.");
+
+                                final_message.message.content.map(|s| Context {
+                                    task_id,
+                                    agent_type: executor.agent_type,
+                                    content: s,
+                                })
+                            } else {
+                                choice.message.content.map(|s| Context {
+                                    task_id,
+                                    agent_type: executor.agent_type,
+                                    content: s,
+                                })
+                            }
+                        }
+                        _ => choice.message.content.map(|s| Context {
                             task_id,
                             agent_type: executor.agent_type,
                             content: s,
                         }),
-                        generation_dumps,
-                    )
+                    };
+
+                    (context, generation_dumps)
                 }
                 Err(e) => {
                     let error_msg = format!(
@@ -587,16 +638,14 @@ async fn execute_plan(
 
     let mut dumps = results
         .iter()
-        .map(|(_ctx, d)| (*d).clone())
-        .flatten()
+        .flat_map(|(_ctx, d)| (*d).clone())
         .collect::<Vec<_>>();
 
     plan_record.dumps.append(&mut dumps);
 
     let results = results
         .into_iter()
-        .map(|(ctx, _d)| ctx)
-        .flatten()
+        .filter_map(|(ctx, _d)| ctx)
         .collect::<Vec<_>>();
 
     Ok((Some(message_mutex), results))
@@ -616,13 +665,22 @@ fn create_executors(tasks: &[Task], language: Language, app_state: &AppState) ->
             agent_type: task.agent,
             agent_prompt: prompt_map[&language][&task.agent].2.clone(),
             dependencies: task.dependencies.clone(),
+            transport_agent: match task.agent {
+                Agent::Transport => Some(prompt_map[&language][&task.agent].3.clone()),
+                _ => None,
+            },
+            get_transit_time_tool: match task.agent {
+                Agent::Transport => Some(
+                    create_get_transit_time_tool()
+                        .expect("Failed to create get_transit_time tool."),
+                ),
+                _ => None,
+            },
         })
         .collect()
 }
 
-fn build_prompt_map(
-    app_state: &AppState,
-) -> HashMap<Language, HashMap<Agent, (String, String, String)>> {
+fn build_prompt_map(app_state: &AppState) -> PromptMap {
     let languages = [Language::Chinese, Language::Japanese, Language::English];
     let agent_types = [
         Agent::Food,
@@ -678,6 +736,7 @@ fn build_prompt_map(
                             inner_v.system_prompt.clone(),
                             inner_v.user_prompt.clone(),
                             language_map[&k].agent.prompt.clone(),
+                            language_map[&k].transport_agent.prompt.clone(),
                         ),
                     )
                 })
@@ -869,4 +928,140 @@ async fn send_final_result_message(
     }
 
     Ok(())
+}
+
+async fn handle_tool_call(
+    tool_call: ChatCompletionMessageToolCall,
+    language: Language,
+    google_maps_client: Arc<::google_maps::Client>,
+) -> anyhow::Result<Vec<RouteWithDuration>> {
+    let transfer_plan = serde_json::from_str::<TransferPlan>(&tool_call.function.arguments)?;
+
+    let mut routes = Vec::with_capacity(transfer_plan.routes.len());
+
+    for route in transfer_plan.routes.iter() {
+        let (from, to) =
+            get_latitude_and_longitude(route, language, google_maps_client.clone()).await?;
+        routes.push((from, to, route.by));
+    }
+
+    let routes = routes
+        .into_iter()
+        .zip(transfer_plan.routes.into_iter())
+        .collect::<Vec<_>>();
+
+    let mut results = Vec::with_capacity(routes.len());
+
+    for (values, route) in routes.into_iter() {
+        let duration = get_travel_time(values, language, google_maps_client.clone()).await?;
+        results.push(RouteWithDuration {
+            from: route.from,
+            to: route.to,
+            by: route.by,
+            duration,
+        });
+    }
+
+    Ok(results)
+}
+
+async fn build_transport_agent_final_message(
+    system_prompt: &str,
+    user_prompt: &str,
+    assistant_message: ChatCompletionResponseMessage,
+    results: Vec<RouteWithDuration>,
+    get_transit_time_tool: Option<ChatCompletionTool>,
+    llm_clients: Arc<LLMClients>,
+) -> anyhow::Result<ChatChoice> {
+    tracing::info!("Transport agent final system prompt: {system_prompt}");
+    tracing::info!("Transport agent final user prompt: {user_prompt}");
+
+    let mut messages = build_one_shot_messages(system_prompt, user_prompt)?;
+
+    let tool_call_id = assistant_message
+        .tool_calls
+        .as_ref()
+        .and_then(|v| v.first().cloned())
+        .map(|c| c.id.clone())
+        .unwrap_or_default();
+
+    messages.push(ChatCompletionRequestMessage::Assistant(
+        ChatCompletionRequestAssistantMessageArgs::default()
+            .content(assistant_message.content.unwrap_or_default())
+            .tool_calls(assistant_message.tool_calls.unwrap_or_default())
+            .build()?,
+    ));
+
+    let results = serde_json::to_string_pretty(&results)?;
+
+    messages.push(ChatCompletionRequestMessage::Tool(
+        ChatCompletionRequestToolMessageArgs::default()
+            .content(ChatCompletionRequestToolMessageContent::Text(results))
+            .tool_call_id(tool_call_id)
+            .build()?,
+    ));
+
+    let mut request = CreateChatCompletionRequestArgs::default();
+    request
+        .model(SONNET_4)
+        .temperature(TEMPERATURE_MEDIUM)
+        .messages(messages);
+
+    if let Some(tool) = get_transit_time_tool {
+        request.tools(vec![tool]);
+    }
+
+    let response = llm_clients
+        .open_router_clients
+        .get(&Agent::Transport)
+        .expect("Failed to get open router client for transport agent.")
+        .chat()
+        .create(request.build()?)
+        .await?;
+
+    response.choices.first().cloned().ok_or(anyhow::anyhow!(
+        "Failed to generate final message for transport agent."
+    ))
+}
+
+fn create_get_transit_time_tool() -> anyhow::Result<ChatCompletionTool> {
+    Ok(ChatCompletionToolArgs::default()
+                .r#type(ChatCompletionToolType::Function)
+                .function(FunctionObjectArgs::default()
+                    .name("get_transit_time")
+                    .description("Get transit time needed to navigate from one place to another.")
+                    .strict(true)
+                    .parameters(json!({
+                        "type": "object",
+                        "properties": {
+                            "routes": {
+                                "type": "array",
+                                "description": "A list of routes covered in the itinerary.",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "from": {
+                                            "type": "string",
+                                            "description": "The origin or start point of a route."
+                                        },
+                                        "to": {
+                                            "type": "string",
+                                            "description": "The destination, goal, or end point of a route."
+                                        },
+                                        "by": {
+                                            "type": "string",
+                                            "description": "The type of transit to take.",
+                                            "enum": ["drive", "transit"]
+                                        }
+                                    },
+                                    "required": ["from", "to", "by"],
+                                    "additionalProperties": false
+                                }
+                            }
+                        },
+                        "required": ["routes"],
+                        "additionalProperties": false
+                    }))
+                    .build()?)
+                .build()?)
 }
