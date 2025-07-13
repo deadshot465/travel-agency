@@ -1,7 +1,9 @@
 use std::{collections::HashMap, fmt::Display, sync::Arc};
 
 use async_openai::types::{
-    ChatChoice, ChatCompletionRequestMessage, ChatCompletionRequestProvider, ChatCompletionTool, ChatCompletionToolChoiceOption, CreateChatCompletionRequest, CreateChatCompletionRequestArgs, CreateChatCompletionResponse
+    ChatChoice, ChatCompletionRequestMessage, ChatCompletionRequestProvider, ChatCompletionTool,
+    ChatCompletionToolChoiceOption, CreateChatCompletionRequest, CreateChatCompletionRequestArgs,
+    CreateChatCompletionResponse,
 };
 use async_trait::async_trait;
 use dashmap::DashMap;
@@ -11,7 +13,7 @@ use tokio::{sync::Mutex, task::JoinSet};
 
 use crate::shared::{
     CHAT_GPT_4O_LATEST, DEEP_SEEK_R1, DEEP_SEEK_V3, DOUBAO_SEED_16, ERNIE_45_300B_A47B,
-    GEMINI_25_PRO, GLM_4_PLUS, GPT_41, GROK_3, GROK_4, KIMI_LATEST, MISTRAL_LARGE, OPUS_4,
+    GEMINI_25_PRO, GLM_4_PLUS, GPT_41, GROK_3, GROK_4, KIMI_LATEST, MISTRAL_LARGE, O3, OPUS_4,
     QWEN_3_235B_A22B, QWEN_MAX, SONNET_4, TEMPERATURE_HIGH, TEMPERATURE_LOW, TEMPERATURE_MEDIUM,
     structs::{LLMClients, agent::record::GenerationDump},
     utility::build_one_shot_messages,
@@ -27,6 +29,7 @@ pub static MODEL_NAME_MAP: Lazy<DashMap<LanguageModel, String>> = Lazy::new(|| {
     [
         (LanguageModel::ChatGPT4o, CHAT_GPT_4O_LATEST.into()),
         (LanguageModel::GPT41, GPT_41.into()),
+        (LanguageModel::O3, O3.into()),
         (LanguageModel::Sonnet4, SONNET_4.into()),
         (LanguageModel::Opus4, OPUS_4.into()),
         (LanguageModel::Gemini25Pro, GEMINI_25_PRO.into()),
@@ -80,6 +83,7 @@ pub enum LanguageModel {
     // OpenAI
     ChatGPT4o,
     GPT41,
+    O3,
     // Anthropic
     Sonnet4,
     Opus4,

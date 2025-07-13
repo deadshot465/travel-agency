@@ -22,6 +22,7 @@ pub const GPT_41: &str = "gpt-4.1";
 pub const GEMINI_25_PRO: &str = "google/gemini-2.5-pro";
 pub const GEMINI_25_FLASH: &str = "google/gemini-2.5-flash";
 pub const CHAT_GPT_4O_LATEST: &str = "chatgpt-4o-latest";
+pub const O3: &str = "o3";
 pub const O3_PRO: &str = "o3-pro";
 pub const SONNET_4: &str = "anthropic/claude-sonnet-4";
 pub const OPUS_4: &str = "anthropic/claude-opus-4";

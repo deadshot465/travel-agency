@@ -939,9 +939,16 @@ async fn handle_tool_call(
 
     let mut routes = Vec::with_capacity(transfer_plan.routes.len());
 
+    let lat_lngs = Arc::new(DashMap::new());
+
     for route in transfer_plan.routes.iter() {
-        let (from, to) =
-            get_latitude_and_longitude(route, language, google_maps_client.clone()).await?;
+        let (from, to) = get_latitude_and_longitude(
+            route,
+            language,
+            lat_lngs.clone(),
+            google_maps_client.clone(),
+        )
+        .await?;
         routes.push((from, to, route.by));
     }
 
@@ -1051,7 +1058,7 @@ fn create_get_transit_time_tool() -> anyhow::Result<ChatCompletionTool> {
                                         "by": {
                                             "type": "string",
                                             "description": "The type of transit to take.",
-                                            "enum": ["drive", "transit"]
+                                            "enum": ["drive_or_taxi", "public_transport"]
                                         }
                                     },
                                     "required": ["from", "to", "by"],

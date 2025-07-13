@@ -21,8 +21,8 @@ pub struct RouteWithDuration {
 }
 
 #[derive(Deserialize, Serialize, Debug, Clone, Copy, Hash, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "snake_case")]
 pub enum TransferMethod {
-    Drive,
-    Transit,
+    DriveOrTaxi,
+    PublicTransport,
 }
