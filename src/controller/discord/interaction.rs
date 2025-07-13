@@ -937,6 +937,8 @@ async fn handle_tool_call(
 ) -> anyhow::Result<Vec<RouteWithDuration>> {
     let transfer_plan = serde_json::from_str::<TransferPlan>(&tool_call.function.arguments)?;
 
+    tracing::debug!("Transfer Plan: {transfer_plan:?}");
+
     let mut routes = Vec::with_capacity(transfer_plan.routes.len());
 
     let lat_lngs = Arc::new(DashMap::new());
@@ -980,9 +982,6 @@ async fn build_transport_agent_final_message(
     get_transit_time_tool: Option<ChatCompletionTool>,
     llm_clients: Arc<LLMClients>,
 ) -> anyhow::Result<ChatChoice> {
-    tracing::info!("Transport agent final system prompt: {system_prompt}");
-    tracing::info!("Transport agent final user prompt: {user_prompt}");
-
     let mut messages = build_one_shot_messages(system_prompt, user_prompt)?;
 
     let tool_call_id = assistant_message
