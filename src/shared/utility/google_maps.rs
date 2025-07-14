@@ -1,7 +1,10 @@
 use std::sync::Arc;
 
 use dashmap::DashMap;
-use google_maps::{LatLng, prelude::TravelMode};
+use google_maps::{
+    LatLng,
+    prelude::{DepartureTime, Local, TravelMode},
+};
 
 use crate::shared::structs::{
     agent::Language,
@@ -79,11 +82,21 @@ pub async fn get_travel_time(
         _ => TravelMode::Transit,
     };
 
+    let date = Local::now().date_naive();
+    // To get approximate travel time from a place to another, we're setting time to 12:00:00 here.
+    let departure_time = DepartureTime::At(
+        date.and_time(
+            chrono::NaiveTime::from_hms_opt(12, 0, 0)
+                .ok_or(anyhow::anyhow!("Failed to construct a NaiveTime"))?,
+        ),
+    );
+
     let direction_response = client
         .directions(from, to)
         .with_language(response_language)
         .with_alternatives(false)
         .with_travel_mode(travel_mode.clone())
+        .with_departure_time(departure_time)
         .execute()
         .await;
 
