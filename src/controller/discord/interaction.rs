@@ -565,7 +565,7 @@ async fn execute_plan(
                         Agent::Transport => {
                             if let Some(reason) = choice.finish_reason
                                 && reason == FinishReason::ToolCalls
-                                && let Some(tool_call) = choice
+                                && let Some(mut tool_call) = choice
                                     .message
                                     .tool_calls
                                     .as_ref()
@@ -611,6 +611,13 @@ async fn execute_plan(
                                             });
 
                                         break;
+                                    } else {
+                                        tool_call = final_message
+                                            .message
+                                            .tool_calls
+                                            .as_ref()
+                                            .and_then(|v| v.first().cloned())
+                                            .expect("Failed to extract tool call from response.");
                                     }
                                 }
 
@@ -1032,6 +1039,8 @@ async fn build_transport_agent_final_message(
             .tool_call_id(tool_call_id)
             .build()?,
     ));
+
+    tracing::debug!("Messages with tool result: {messages:?}");
 
     let mut request = CreateChatCompletionRequestArgs::default();
     request
