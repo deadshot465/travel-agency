@@ -53,6 +53,8 @@ lazy_static::lazy_static! {
     pub static ref COMMAND_REGISTRY: Mutex<HashMap<String, CommandHandler>> = Mutex::new(HashMap::new());
 }
 
+const MAX_RETRY_COUNT: u8 = 5;
+
 pub fn register_command(name: &str, handler: CommandHandler) {
     COMMAND_REGISTRY
         .blocking_lock()
@@ -524,16 +526,7 @@ async fn execute_plan(
 
             match executor.execute(clone, llm_clients_clone.clone()).await {
                 Ok((choice, dumps)) => {
-                    if let Some(ref content) = choice.message.content {
-                        contexts_clone.insert(
-                            task_id.clone(),
-                            Context {
-                                task_id: task_id.clone(),
-                                agent_type: executor.agent_type,
-                                content: content.clone(),
-                            },
-                        );
-
+                    if choice.message.content.is_some() {
                         let mut message = message_mutex_clone.lock().await;
 
                         if let Some(original_embed) = message.embeds.first()
@@ -578,43 +571,74 @@ async fn execute_plan(
                                     .as_ref()
                                     .and_then(|v| v.first().cloned())
                             {
-                                let results = handle_tool_call(
-                                    tool_call.clone(),
-                                    language,
-                                    google_maps_client_clone,
-                                )
-                                .await
-                                .expect("Failed to handle tool calls.");
-                                let assistant_message = choice.message.clone();
+                                let mut completed_context = None;
+                                for _i in 0..MAX_RETRY_COUNT {
+                                    let results = handle_tool_call(
+                                        tool_call.clone(),
+                                        language,
+                                        google_maps_client_clone.clone(),
+                                    )
+                                    .await
+                                    .expect("Failed to handle tool calls.");
 
-                                let final_message = build_transport_agent_final_message(
-                                    &executor.system_prompt,
-                                    &executor.user_prompt,
-                                    assistant_message,
-                                    results,
-                                    executor.get_transit_time_tool.clone(),
-                                    llm_clients_clone,
-                                )
-                                .await
-                                .expect("Failed to build final message for transport agent.");
+                                    let assistant_message = choice.message.clone();
 
-                                final_message.message.content.map(|s| Context {
-                                    task_id,
-                                    agent_type: executor.agent_type,
-                                    content: s,
-                                })
+                                    let final_message = build_transport_agent_final_message(
+                                        &executor.system_prompt,
+                                        &executor.user_prompt,
+                                        assistant_message,
+                                        results,
+                                        executor.get_transit_time_tool.clone(),
+                                        llm_clients_clone.clone(),
+                                    )
+                                    .await
+                                    .expect("Failed to build final message for transport agent.");
+
+                                    if let Some(reason) = final_message.finish_reason
+                                        && reason != FinishReason::ToolCalls
+                                    {
+                                        completed_context =
+                                            final_message.message.content.map(|s| {
+                                                let ctx = Context {
+                                                    task_id: task_id.clone(),
+                                                    agent_type: executor.agent_type,
+                                                    content: s,
+                                                };
+
+                                                contexts_clone.insert(task_id, ctx.clone());
+
+                                                ctx
+                                            });
+
+                                        break;
+                                    }
+                                }
+
+                                completed_context
                             } else {
-                                choice.message.content.map(|s| Context {
-                                    task_id,
-                                    agent_type: executor.agent_type,
-                                    content: s,
+                                choice.message.content.map(|s| {
+                                    let ctx = Context {
+                                        task_id: task_id.clone(),
+                                        agent_type: executor.agent_type,
+                                        content: s,
+                                    };
+
+                                    contexts_clone.insert(task_id, ctx.clone());
+
+                                    ctx
                                 })
                             }
                         }
-                        _ => choice.message.content.map(|s| Context {
-                            task_id,
-                            agent_type: executor.agent_type,
-                            content: s,
+                        _ => choice.message.content.map(|s| {
+                            let ctx = Context {
+                                task_id: task_id.clone(),
+                                agent_type: executor.agent_type,
+                                content: s,
+                            };
+
+                            contexts_clone.insert(task_id, ctx.clone());
+
+                            ctx
                         }),
                     };
 
@@ -970,6 +994,8 @@ async fn handle_tool_call(
             duration,
         });
     }
+
+    tracing::debug!("Direction UI results: {results:?}");
 
     Ok(results)
 }

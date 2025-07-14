@@ -36,6 +36,7 @@ pub const QWEN_MAX: &str = "qwen/qwen-max";
 pub const QWEN_3_235B_A22B: &str = "qwen/qwen3-235b-a22b";
 pub const DOUBAO_SEED_16: &str = "doubao-seed-1-6-250615";
 pub const KIMI_LATEST: &str = "kimi-latest";
+pub const KIMI_K2: &str = "moonshotai/kimi-k2";
 pub const MISTRAL_LARGE: &str = "mistralai/mistral-large-2411";
 pub const MINIMAX_M1: &str = "minimax/minimax-m1";
 pub const ERNIE_45_300B_A47B: &str = "baidu/ernie-4.5-300b-a47b";

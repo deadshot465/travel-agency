@@ -13,8 +13,9 @@ use tokio::{sync::Mutex, task::JoinSet};
 
 use crate::shared::{
     CHAT_GPT_4O_LATEST, DEEP_SEEK_R1, DEEP_SEEK_V3, DOUBAO_SEED_16, ERNIE_45_300B_A47B,
-    GEMINI_25_PRO, GLM_4_PLUS, GPT_41, GROK_3, GROK_4, KIMI_LATEST, MISTRAL_LARGE, O3, OPUS_4,
-    QWEN_3_235B_A22B, QWEN_MAX, SONNET_4, TEMPERATURE_HIGH, TEMPERATURE_LOW, TEMPERATURE_MEDIUM,
+    GEMINI_25_PRO, GLM_4_PLUS, GPT_41, GROK_3, GROK_4, KIMI_K2, KIMI_LATEST, MISTRAL_LARGE, O3,
+    OPUS_4, QWEN_3_235B_A22B, QWEN_MAX, SONNET_4, TEMPERATURE_HIGH, TEMPERATURE_LOW,
+    TEMPERATURE_MEDIUM,
     structs::{LLMClients, agent::record::GenerationDump},
     utility::build_one_shot_messages,
 };
@@ -43,6 +44,7 @@ pub static MODEL_NAME_MAP: Lazy<DashMap<LanguageModel, String>> = Lazy::new(|| {
         (LanguageModel::Qwen3235BA22B, QWEN_3_235B_A22B.into()),
         (LanguageModel::DoubaoSeed16, DOUBAO_SEED_16.into()),
         (LanguageModel::KimiLatest, KIMI_LATEST.into()),
+        (LanguageModel::KimiK2, KIMI_K2.into()),
         (LanguageModel::MistralLarge, MISTRAL_LARGE.into()),
         // (LanguageModel::MiniMaxM1, MINIMAX_M1.into()),
         (LanguageModel::Ernie45300BA47B, ERNIE_45_300B_A47B.into()),
@@ -106,6 +108,7 @@ pub enum LanguageModel {
     DoubaoSeed16,
     // Kimi
     KimiLatest,
+    KimiK2,
     // Mistral
     MistralLarge,
     // MiniMax
