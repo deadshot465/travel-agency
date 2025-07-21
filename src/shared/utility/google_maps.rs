@@ -8,7 +8,7 @@ use google_maps::{
 
 use crate::shared::structs::{
     agent::Language,
-    google_maps::{Route, TransferMethod},
+    google_maps::{AlternativeTravelDuration, Route, TransferMethod},
 };
 
 pub async fn get_latitude_and_longitude(
@@ -70,16 +70,16 @@ pub async fn get_travel_time(
     (from, to, transfer_method): (LatLng, LatLng, TransferMethod),
     language: Language,
     client: Arc<::google_maps::Client>,
-) -> anyhow::Result<String> {
+) -> anyhow::Result<(String, AlternativeTravelDuration)> {
     let response_language = match language {
         Language::Chinese => ::google_maps::Language::ChineseTaiwan,
         Language::Japanese => ::google_maps::Language::Japanese,
         _ => ::google_maps::Language::EnglishUs,
     };
 
-    let travel_mode = match transfer_method {
-        TransferMethod::DriveOrTaxi => TravelMode::Driving,
-        _ => TravelMode::Transit,
+    let (travel_mode, alternative_travel_mode) = match transfer_method {
+        TransferMethod::DriveOrTaxi => (TravelMode::Driving, TravelMode::Transit),
+        _ => (TravelMode::Transit, TravelMode::Driving),
     };
 
     let date = Local::now().date_naive();
@@ -96,43 +96,73 @@ pub async fn get_travel_time(
         .with_language(response_language)
         .with_alternatives(false)
         .with_travel_mode(travel_mode.clone())
+        .with_departure_time(departure_time.clone())
+        .execute()
+        .await;
+
+    let alternative_direction_response = client
+        .directions(from, to)
+        .with_language(response_language)
+        .with_alternatives(false)
+        .with_travel_mode(alternative_travel_mode.clone())
         .with_departure_time(departure_time)
         .execute()
         .await;
 
-    match direction_response {
-        Ok(res) => Ok(res
-            .routes
-            .first()
-            .and_then(|route| route.legs.first())
-            .map(|leg| leg.duration.text.clone())
-            .unwrap_or_default()),
-        Err(e) => {
-            let error_message = format!("Search failed with {e:?}. Retry with driving...");
-            tracing::warn!("{error_message}");
+    let alternative_transfer_method = match alternative_travel_mode {
+        TravelMode::Driving => TransferMethod::DriveOrTaxi,
+        _ => TransferMethod::PublicTransport,
+    };
 
-            let response = client
-                .directions(from, to)
-                .with_language(response_language)
-                .with_alternatives(false)
-                .with_travel_mode(travel_mode)
-                .execute()
-                .await;
-
-            match response {
-                Ok(res) => Ok(res
-                    .routes
-                    .first()
-                    .and_then(|route| route.legs.first())
-                    .map(|leg| leg.duration.text.clone())
-                    .unwrap_or_default()),
-                Err(e) => {
-                    let error_message =
-                        format!("Search failed with {e:?}. Returning empty results...");
-                    tracing::warn!("{error_message}");
-                    Ok("No result".into())
-                }
-            }
+    match (direction_response, alternative_direction_response) {
+        (Ok(res_1), Ok(res_2)) => Ok((
+            extract_duration_text(&res_1.routes),
+            AlternativeTravelDuration {
+                by: alternative_transfer_method,
+                duration: Some(extract_duration_text(&res_2.routes)),
+            },
+        )),
+        (Ok(res_1), Err(e)) => {
+            let error_msg = format!("Failed to get result for alternative route: {e:?}");
+            tracing::warn!("{error_msg}");
+            Ok((
+                extract_duration_text(&res_1.routes),
+                AlternativeTravelDuration {
+                    by: alternative_transfer_method,
+                    duration: None,
+                },
+            ))
+        }
+        (Err(e), Ok(res_2)) => {
+            let error_msg = format!("Failed to get result for main route: {e:?}");
+            tracing::warn!("{error_msg}");
+            Ok((
+                "No result".into(),
+                AlternativeTravelDuration {
+                    by: alternative_transfer_method,
+                    duration: Some(extract_duration_text(&res_2.routes)),
+                },
+            ))
+        }
+        (Err(e_1), Err(e_2)) => {
+            let error_msg =
+                format!("Failed to get any result from API.\nError 1: {e_1:?}\nError 2: {e_2:?}");
+            tracing::warn!("{error_msg}");
+            Ok((
+                "No result".into(),
+                AlternativeTravelDuration {
+                    by: alternative_transfer_method,
+                    duration: None,
+                },
+            ))
         }
     }
+}
+
+fn extract_duration_text(routes: &[::google_maps::directions::response::route::Route]) -> String {
+    routes
+        .first()
+        .and_then(|r| r.legs.first())
+        .map(|l| l.duration.text.clone())
+        .unwrap_or_default()
 }

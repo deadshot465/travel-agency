@@ -18,6 +18,13 @@ pub struct RouteWithDuration {
     pub to: String,
     pub by: TransferMethod,
     pub duration: String,
+    pub alternative: AlternativeTravelDuration,
+}
+
+#[derive(Deserialize, Serialize, Debug, Clone)]
+pub struct AlternativeTravelDuration {
+    pub by: TransferMethod,
+    pub duration: Option<String>,
 }
 
 #[derive(Deserialize, Serialize, Debug, Clone, Copy, Hash, PartialEq, Eq)]

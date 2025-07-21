@@ -146,6 +146,7 @@ pub struct Executor {
     pub agent_prompt: String,
     pub dependencies: Vec<TaskId>,
     pub transport_agent: Option<String>,
+    pub transport_agent_maximum_try: Option<String>,
     pub get_transit_time_tool: Option<ChatCompletionTool>,
 }
 

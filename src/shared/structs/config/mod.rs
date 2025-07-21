@@ -25,6 +25,7 @@ pub struct Language {
     pub agent: Prompt,
     pub synthesis: Prompt,
     pub transport_agent: Prompt,
+    pub transport_agent_maximum_try: Prompt,
 }
 
 #[derive(Deserialize, Serialize, Debug, Clone, Default)]

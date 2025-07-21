@@ -2,9 +2,9 @@ use async_openai::types::{
     ChatChoice, ChatCompletionMessageToolCall, ChatCompletionRequestAssistantMessageArgs,
     ChatCompletionRequestMessage, ChatCompletionRequestToolMessageArgs,
     ChatCompletionRequestToolMessageContent, ChatCompletionRequestUserMessageArgs,
-    ChatCompletionResponseMessage, ChatCompletionTool, ChatCompletionToolArgs,
-    ChatCompletionToolChoiceOption, ChatCompletionToolType, CreateChatCompletionRequestArgs,
-    FinishReason, FunctionObjectArgs, ResponseFormat, ResponseFormatJsonSchema, Role,
+    ChatCompletionTool, ChatCompletionToolArgs, ChatCompletionToolChoiceOption,
+    ChatCompletionToolType, CreateChatCompletionRequestArgs, FinishReason, FunctionObjectArgs,
+    ResponseFormat, ResponseFormatJsonSchema, Role,
 };
 use axum::body::Bytes;
 use axum::http::StatusCode;
@@ -47,7 +47,7 @@ use crate::shared::{
 type CommandHandler =
     fn(CommandInteraction, AppState) -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send>>;
 
-type PromptMap = HashMap<Language, HashMap<Agent, (String, String, String, String)>>;
+type PromptMap = HashMap<Language, HashMap<Agent, PromptSet>>;
 
 lazy_static::lazy_static! {
     pub static ref COMMAND_REGISTRY: Mutex<HashMap<String, CommandHandler>> = Mutex::new(HashMap::new());
@@ -70,6 +70,15 @@ macro_rules! call_command {
             Err(anyhow::anyhow!("Unknown command: {}", $command_name))
         }
     }};
+}
+
+#[derive(Debug, Clone)]
+struct PromptSet {
+    pub system: String,
+    pub user: String,
+    pub agent: String,
+    pub transport_agent: String,
+    pub transport_agent_maximum_retry: String,
 }
 
 #[axum::debug_handler]
@@ -572,7 +581,41 @@ async fn execute_plan(
                                     .and_then(|v| v.first().cloned())
                             {
                                 let mut completed_context = None;
-                                for _i in 0..MAX_RETRY_COUNT {
+
+                                let mut assistant_message = choice.message.clone();
+
+                                let maximum_try_prompt = executor.transport_agent_maximum_try.clone().unwrap_or_default();
+
+                                for i in 0..MAX_RETRY_COUNT {
+                                    let system_prompt = executor
+                                        .system_prompt
+                                        .replace("$RETRY_COUNT", &i.to_string())
+                                        .replace("$MAXIMUM_RETRY_REACHED", if i == MAX_RETRY_COUNT - 1 {
+                                            &maximum_try_prompt
+                                        } else {
+                                            ""
+                                        })
+                                        .trim()
+                                        .to_string();
+
+                                    let mut message_histories = build_one_shot_messages(
+                                        &system_prompt, &executor.user_prompt)
+                                        .expect("Failed to build one-shot message with system prompt and user prompt.");
+
+                                    let tool_call_id = assistant_message
+                                        .tool_calls
+                                        .as_ref()
+                                        .and_then(|v| v.first())
+                                        .map(|call| call.id.clone())
+                                        .unwrap_or_default();
+
+                                    message_histories.push(ChatCompletionRequestMessage::Assistant(
+                                        ChatCompletionRequestAssistantMessageArgs::default()
+                                            .content(assistant_message.content.unwrap_or_default())
+                                            .tool_calls(assistant_message.tool_calls.unwrap_or_default())
+                                            .build()
+                                            .expect("Failed to add assistant message to message histories.")));
+
                                     let results = handle_tool_call(
                                         tool_call.clone(),
                                         language,
@@ -581,12 +624,9 @@ async fn execute_plan(
                                     .await
                                     .expect("Failed to handle tool calls.");
 
-                                    let assistant_message = choice.message.clone();
-
-                                    let final_message = build_transport_agent_final_message(
-                                        &executor.system_prompt,
-                                        &executor.user_prompt,
-                                        assistant_message,
+                                    let last_message = build_transport_agent_final_message(
+                                        &mut message_histories,
+                                        tool_call_id.clone(),
                                         results,
                                         executor.get_transit_time_tool.clone(),
                                         llm_clients_clone.clone(),
@@ -594,11 +634,11 @@ async fn execute_plan(
                                     .await
                                     .expect("Failed to build final message for transport agent.");
 
-                                    if let Some(reason) = final_message.finish_reason
+                                    if let Some(reason) = last_message.finish_reason
                                         && reason != FinishReason::ToolCalls
                                     {
                                         completed_context =
-                                            final_message.message.content.map(|s| {
+                                            last_message.message.content.map(|s| {
                                                 let ctx = Context {
                                                     task_id: task_id.clone(),
                                                     agent_type: executor.agent_type,
@@ -612,12 +652,14 @@ async fn execute_plan(
 
                                         break;
                                     } else {
-                                        tool_call = final_message
+                                        tool_call = last_message
                                             .message
                                             .tool_calls
                                             .as_ref()
                                             .and_then(|v| v.first().cloned())
                                             .expect("Failed to extract tool call from response.");
+
+                                        assistant_message = last_message.message.clone();
                                     }
                                 }
 
@@ -689,15 +731,25 @@ fn create_executors(tasks: &[Task], language: Language, app_state: &AppState) ->
         .iter()
         .map(|task| Executor {
             task_id: task.task_id.clone(),
-            system_prompt: prompt_map[&language][&task.agent].0.clone(),
+            system_prompt: prompt_map[&language][&task.agent].system.clone(),
             user_prompt: prompt_map[&language][&task.agent]
-                .1
+                .user
                 .replace("$INSTRUCTION", &task.instruction),
             agent_type: task.agent,
-            agent_prompt: prompt_map[&language][&task.agent].2.clone(),
+            agent_prompt: prompt_map[&language][&task.agent].agent.clone(),
             dependencies: task.dependencies.clone(),
             transport_agent: match task.agent {
-                Agent::Transport => Some(prompt_map[&language][&task.agent].3.clone()),
+                Agent::Transport => {
+                    Some(prompt_map[&language][&task.agent].transport_agent.clone())
+                }
+                _ => None,
+            },
+            transport_agent_maximum_try: match task.agent {
+                Agent::Transport => Some(
+                    prompt_map[&language][&task.agent]
+                        .transport_agent_maximum_retry
+                        .clone(),
+                ),
                 _ => None,
             },
             get_transit_time_tool: match task.agent {
@@ -763,12 +815,16 @@ fn build_prompt_map(app_state: &AppState) -> PromptMap {
                 .map(|(inner_k, inner_v)| {
                     (
                         inner_k,
-                        (
-                            inner_v.system_prompt.clone(),
-                            inner_v.user_prompt.clone(),
-                            language_map[&k].agent.prompt.clone(),
-                            language_map[&k].transport_agent.prompt.clone(),
-                        ),
+                        PromptSet {
+                            system: inner_v.system_prompt.clone(),
+                            user: inner_v.user_prompt.clone(),
+                            agent: language_map[&k].agent.prompt.clone(),
+                            transport_agent: language_map[&k].transport_agent.prompt.clone(),
+                            transport_agent_maximum_retry: language_map[&k]
+                                .transport_agent_maximum_try
+                                .prompt
+                                .clone(),
+                        },
                     )
                 })
                 .collect::<HashMap<_, _>>();
@@ -993,12 +1049,14 @@ async fn handle_tool_call(
     let mut results = Vec::with_capacity(routes.len());
 
     for (values, route) in routes.into_iter() {
-        let duration = get_travel_time(values, language, google_maps_client.clone()).await?;
+        let (duration, alternative) =
+            get_travel_time(values, language, google_maps_client.clone()).await?;
         results.push(RouteWithDuration {
             from: route.from,
             to: route.to,
             by: route.by,
             duration,
+            alternative,
         });
     }
 
@@ -1008,45 +1066,28 @@ async fn handle_tool_call(
 }
 
 async fn build_transport_agent_final_message(
-    system_prompt: &str,
-    user_prompt: &str,
-    assistant_message: ChatCompletionResponseMessage,
+    message_histories: &mut Vec<ChatCompletionRequestMessage>,
+    tool_call_id: String,
     results: Vec<RouteWithDuration>,
     get_transit_time_tool: Option<ChatCompletionTool>,
     llm_clients: Arc<LLMClients>,
 ) -> anyhow::Result<ChatChoice> {
-    let mut messages = build_one_shot_messages(system_prompt, user_prompt)?;
-
-    let tool_call_id = assistant_message
-        .tool_calls
-        .as_ref()
-        .and_then(|v| v.first().cloned())
-        .map(|c| c.id.clone())
-        .unwrap_or_default();
-
-    messages.push(ChatCompletionRequestMessage::Assistant(
-        ChatCompletionRequestAssistantMessageArgs::default()
-            .content(assistant_message.content.unwrap_or_default())
-            .tool_calls(assistant_message.tool_calls.unwrap_or_default())
-            .build()?,
-    ));
-
     let results = serde_json::to_string_pretty(&results)?;
 
-    messages.push(ChatCompletionRequestMessage::Tool(
+    message_histories.push(ChatCompletionRequestMessage::Tool(
         ChatCompletionRequestToolMessageArgs::default()
             .content(ChatCompletionRequestToolMessageContent::Text(results))
             .tool_call_id(tool_call_id)
             .build()?,
     ));
 
-    tracing::debug!("Messages with tool result: {messages:?}");
+    tracing::debug!("Messages with tool result: {:?}", &message_histories[2..]);
 
     let mut request = CreateChatCompletionRequestArgs::default();
     request
         .model(SONNET_4)
         .temperature(TEMPERATURE_MEDIUM)
-        .messages(messages);
+        .messages(message_histories.clone());
 
     if let Some(tool) = get_transit_time_tool {
         request.tools(vec![tool]);
@@ -1091,7 +1132,7 @@ fn create_get_transit_time_tool() -> anyhow::Result<ChatCompletionTool> {
                                         },
                                         "by": {
                                             "type": "string",
-                                            "description": "The type of transit to take.",
+                                            "description": "The preferred type of transit to take.",
                                             "enum": ["drive_or_taxi", "public_transport"]
                                         }
                                     },
