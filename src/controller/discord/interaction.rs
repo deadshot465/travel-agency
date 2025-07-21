@@ -325,7 +325,7 @@ async fn orchestrate(
                                 },
                                 "dependencies": {
                                     "type": "array",
-                                    "description": "List of task IDs that must complete before this task.",
+                                    "description": "List of task IDs that must complete before this task. All task IDs in this list have to be `task_id`s of other tasks in the `tasks` and **must not** include your own tasks.",
                                     "items": {
                                         "type": "string"
                                     }
