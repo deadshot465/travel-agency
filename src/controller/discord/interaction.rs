@@ -347,26 +347,51 @@ async fn orchestrate(
         } })
         .build()?;
 
-    let response = app_state
-        .llm_clients
-        .open_router_clients
-        .get(&Agent::default())
-        .expect("Failed to get the Open Router client for orchestration.")
-        .chat()
-        .create(request)
-        .await;
+    loop {
+        let request_clone = request.clone();
 
-    match response {
-        Ok(res) => {
-            let content = res.choices[0].message.content.clone().unwrap_or_default();
-            let orchestration_plan = serde_json::from_str::<OrchestrationPlan>(&content)?;
-            tracing::info!("Orchestration response: {:?}", &orchestration_plan);
-            Ok(orchestration_plan)
-        }
-        Err(e) => {
-            let error_msg = format!("Error when creating orchestration tasks: {e:?}");
-            tracing::error!("{}", &error_msg);
-            Err(anyhow::anyhow!("{}", error_msg))
+        let response = app_state
+            .llm_clients
+            .open_router_clients
+            .get(&Agent::default())
+            .expect("Failed to get the Open Router client for orchestration.")
+            .chat()
+            .create(request_clone)
+            .await;
+
+        match response {
+            Ok(res) => {
+                let content = res.choices[0].message.content.clone().unwrap_or_default();
+                let orchestration_plan = serde_json::from_str::<OrchestrationPlan>(&content)?;
+
+                let mut all_dependencies = orchestration_plan
+                    .tasks
+                    .iter()
+                    .flat_map(|t| t.dependencies.clone())
+                    .collect::<Vec<_>>();
+
+                all_dependencies.sort();
+                all_dependencies.dedup();
+
+                let all_task_ids = orchestration_plan
+                    .tasks
+                    .iter()
+                    .map(|t| t.task_id.clone())
+                    .collect::<Vec<_>>();
+
+                if all_dependencies
+                    .into_iter()
+                    .all(|dep| all_task_ids.contains(&dep))
+                {
+                    tracing::info!("Orchestration response: {:?}", &orchestration_plan);
+                    return Ok(orchestration_plan);
+                }
+            }
+            Err(e) => {
+                let error_msg = format!("Error when creating orchestration tasks: {e:?}");
+                tracing::error!("{}", &error_msg);
+                return Err(anyhow::anyhow!("{}", error_msg));
+            }
         }
     }
 }
