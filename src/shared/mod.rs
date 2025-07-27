@@ -50,3 +50,5 @@ pub const DISCORD_CREATE_THREAD_ENDPOINT: &str =
     "/channels/$CHANNEL_ID/messages/$MESSAGE_ID/threads";
 
 pub const EMBED_COLOR: Colour = Colour::from_rgb(147, 156, 149);
+
+pub const MAX_TOOL_RETRY_COUNT: u8 = 5;

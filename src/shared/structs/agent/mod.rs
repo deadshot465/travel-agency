@@ -13,9 +13,9 @@ use tokio::{sync::Mutex, task::JoinSet};
 
 use crate::shared::{
     CHAT_GPT_4O_LATEST, DEEP_SEEK_R1, DEEP_SEEK_V3, DOUBAO_SEED_16, ERNIE_45_300B_A47B,
-    GEMINI_25_PRO, GLM_4_PLUS, GPT_41, GROK_3, GROK_4, KIMI_K2, KIMI_LATEST, MISTRAL_LARGE, O3,
-    OPUS_4, QWEN_3_235B_A22B, QWEN_MAX, SONNET_4, TEMPERATURE_HIGH, TEMPERATURE_LOW,
-    TEMPERATURE_MEDIUM,
+    GEMINI_25_PRO, GLM_4_PLUS, GPT_41, GROK_3, GROK_4, KIMI_K2, KIMI_LATEST, MAX_TOOL_RETRY_COUNT,
+    MISTRAL_LARGE, O3, OPUS_4, QWEN_3_235B_A22B, QWEN_MAX, SONNET_4, TEMPERATURE_HIGH,
+    TEMPERATURE_LOW, TEMPERATURE_MEDIUM,
     structs::{LLMClients, agent::record::GenerationDump},
     utility::build_one_shot_messages,
 };
@@ -356,7 +356,10 @@ impl Taskable for Executor {
         let results_dump = serde_json::to_string_pretty(&results)?;
 
         let transport_agent_prompt = if let Some(ref p) = self.transport_agent {
-            p.clone()
+            p.replace("$RETRY_COUNT", &MAX_TOOL_RETRY_COUNT.to_string())
+                .replace("$MAXIMUM_RETRY_REACHED", "")
+                .trim()
+                .to_string()
         } else {
             "".into()
         };

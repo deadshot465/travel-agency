@@ -40,8 +40,9 @@ use crate::shared::structs::{AppState, LLMClients};
 use crate::shared::utility::google_maps::{get_latitude_and_longitude, get_travel_time};
 use crate::shared::utility::{build_one_shot_messages, create_avatar_url};
 use crate::shared::{
-    EMBED_COLOR, GEMINI_25_FLASH, GEMINI_25_PRO, GPT_41, PLAN_COLLECTION_NAME,
-    PLAN_MAPPING_COLLECTION_NAME, SONNET_4, TEMPERATURE_LOW, TEMPERATURE_MEDIUM,
+    EMBED_COLOR, GEMINI_25_FLASH, GEMINI_25_PRO, GPT_41, MAX_TOOL_RETRY_COUNT,
+    PLAN_COLLECTION_NAME, PLAN_MAPPING_COLLECTION_NAME, SONNET_4, TEMPERATURE_LOW,
+    TEMPERATURE_MEDIUM,
 };
 
 type CommandHandler =
@@ -52,8 +53,6 @@ type PromptMap = HashMap<Language, HashMap<Agent, PromptSet>>;
 lazy_static::lazy_static! {
     pub static ref COMMAND_REGISTRY: Mutex<HashMap<String, CommandHandler>> = Mutex::new(HashMap::new());
 }
-
-const MAX_RETRY_COUNT: u8 = 5;
 
 pub fn register_command(name: &str, handler: CommandHandler) {
     COMMAND_REGISTRY
@@ -611,11 +610,11 @@ async fn execute_plan(
 
                                 let maximum_try_prompt = executor.transport_agent_maximum_try.clone().unwrap_or_default();
 
-                                for i in 0..MAX_RETRY_COUNT {
-                                    let system_prompt = executor
-                                        .system_prompt
+                                for i in 0..MAX_TOOL_RETRY_COUNT {
+                                    let user_prompt = executor
+                                        .user_prompt
                                         .replace("$RETRY_COUNT", &i.to_string())
-                                        .replace("$MAXIMUM_RETRY_REACHED", if i == MAX_RETRY_COUNT - 1 {
+                                        .replace("$MAXIMUM_RETRY_REACHED", if i == MAX_TOOL_RETRY_COUNT - 1 {
                                             &maximum_try_prompt
                                         } else {
                                             ""
@@ -623,8 +622,11 @@ async fn execute_plan(
                                         .trim()
                                         .to_string();
 
+                                    tracing::info!("Retry system prompt: {}", &executor.system_prompt);
+                                    tracing::info!("Retry user prompt: {user_prompt}");
+
                                     let mut message_histories = build_one_shot_messages(
-                                        &system_prompt, &executor.user_prompt)
+                                        &executor.system_prompt, &user_prompt)
                                         .expect("Failed to build one-shot message with system prompt and user prompt.");
 
                                     let tool_call_id = assistant_message
