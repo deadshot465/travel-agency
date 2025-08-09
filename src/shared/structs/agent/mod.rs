@@ -25,6 +25,12 @@ pub type TaskId = String;
 
 pub const DEFAULT_SUBTASK_TIMEOUT: u64 = 60 * 10;
 
+pub const OPENAI_MODELS: [LanguageModel; 3] = [
+    LanguageModel::Gpt5Chat,
+    LanguageModel::Gpt41,
+    LanguageModel::Gpt5,
+];
+
 pub static MODEL_NAME_MAP: Lazy<DashMap<LanguageModel, String>> = Lazy::new(|| {
     [
         (LanguageModel::Gpt5Chat, GPT_5_CHAT_LATEST.into()),
@@ -276,7 +282,7 @@ impl Taskable for Executor {
                     .expect("Failed to get the Open Router client for the agent.");
 
                 let result = match model {
-                    m if m == LanguageModel::Gpt5Chat || m == LanguageModel::Gpt41 => {
+                    m if OPENAI_MODELS.contains(&m) => {
                         let chat = llm_clients_clone.openai_client.chat();
                         let future = chat.create(request);
                         tokio::time::timeout(std::time::Duration::from_secs(DEFAULT_SUBTASK_TIMEOUT), future).await
@@ -366,11 +372,22 @@ impl Taskable for Executor {
 
         let messages = build_one_shot_messages(&self.system_prompt, &self.user_prompt)?;
 
+        let agent_model = if self.agent_type == Agent::Transport {
+            GPT5
+        } else {
+            SONNET_4
+        };
+
         let mut request = CreateChatCompletionRequestArgs::default();
         request
-            .model(SONNET_4)
+            .model(agent_model)
             .temperature(TEMPERATURE_MEDIUM)
             .messages(messages);
+
+        let mut client = &*llm_clients
+            .open_router_clients
+            .get(&self.agent_type)
+            .expect("Failed to get the Open Router client for the agent.");
 
         if self.agent_type == Agent::Transport
             && let Some(ref tool) = self.get_transit_time_tool
@@ -378,12 +395,11 @@ impl Taskable for Executor {
             request
                 .tools(vec![tool.clone()])
                 .tool_choice(ChatCompletionToolChoiceOption::Required);
+
+            client = &llm_clients.openai_client;
         }
 
-        llm_clients
-            .open_router_clients
-            .get(&self.agent_type)
-            .expect("Failed to get the Open Router client for the agent.")
+        client
             .chat()
             .create(request.build()?)
             .await
