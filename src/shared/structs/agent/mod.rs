@@ -12,10 +12,9 @@ use serde::{Deserialize, Serialize};
 use tokio::{sync::Mutex, task::JoinSet};
 
 use crate::shared::{
-    CHAT_GPT_4O_LATEST, DEEP_SEEK_R1, DEEP_SEEK_V3, DOUBAO_SEED_16, ERNIE_45_300B_A47B,
-    GEMINI_25_PRO, GLM_4_PLUS, GPT_41, GROK_3, GROK_4, KIMI_K2, KIMI_LATEST, MAX_TOOL_RETRY_COUNT,
-    MISTRAL_LARGE, O3, OPUS_4, QWEN_3_235B_A22B, QWEN_MAX, SONNET_4, TEMPERATURE_HIGH,
-    TEMPERATURE_LOW, TEMPERATURE_MEDIUM,
+    DEEP_SEEK_R1, DEEP_SEEK_V3, DOUBAO_SEED_16, ERNIE_45_300B_A47B, GEMINI_25_PRO, GLM_45,
+    GPT_5_CHAT_LATEST, GPT_41, GPT5, GROK_3, GROK_4, KIMI_K2, MISTRAL_LARGE, OPUS_41,
+    QWEN_3_235B_A22B, QWEN_MAX, SONNET_4, TEMPERATURE_HIGH, TEMPERATURE_MEDIUM,
     structs::{LLMClients, agent::record::GenerationDump},
     utility::build_one_shot_messages,
 };
@@ -28,22 +27,21 @@ pub const DEFAULT_SUBTASK_TIMEOUT: u64 = 60 * 10;
 
 pub static MODEL_NAME_MAP: Lazy<DashMap<LanguageModel, String>> = Lazy::new(|| {
     [
-        (LanguageModel::ChatGPT4o, CHAT_GPT_4O_LATEST.into()),
-        (LanguageModel::GPT41, GPT_41.into()),
-        (LanguageModel::O3, O3.into()),
+        (LanguageModel::Gpt5Chat, GPT_5_CHAT_LATEST.into()),
+        (LanguageModel::Gpt41, GPT_41.into()),
+        (LanguageModel::Gpt5, GPT5.into()),
         (LanguageModel::Sonnet4, SONNET_4.into()),
-        (LanguageModel::Opus4, OPUS_4.into()),
+        (LanguageModel::Opus41, OPUS_41.into()),
         (LanguageModel::Gemini25Pro, GEMINI_25_PRO.into()),
         (LanguageModel::Grok3, GROK_3.into()),
         (LanguageModel::Grok4, GROK_4.into()),
         (LanguageModel::DeepSeekV3, DEEP_SEEK_V3.into()),
         (LanguageModel::DeepSeekR1, DEEP_SEEK_R1.into()),
-        (LanguageModel::GLM4Plus, GLM_4_PLUS.into()),
+        (LanguageModel::Glm45, GLM_45.into()),
         // (LanguageModel::Step216k, STEP_2_16K.into()),
         (LanguageModel::QwenMax, QWEN_MAX.into()),
         (LanguageModel::Qwen3235BA22B, QWEN_3_235B_A22B.into()),
         (LanguageModel::DoubaoSeed16, DOUBAO_SEED_16.into()),
-        (LanguageModel::KimiLatest, KIMI_LATEST.into()),
         (LanguageModel::KimiK2, KIMI_K2.into()),
         (LanguageModel::MistralLarge, MISTRAL_LARGE.into()),
         // (LanguageModel::MiniMaxM1, MINIMAX_M1.into()),
@@ -83,12 +81,12 @@ pub enum Language {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize)]
 pub enum LanguageModel {
     // OpenAI
-    ChatGPT4o,
-    GPT41,
-    O3,
+    Gpt5Chat,
+    Gpt41,
+    Gpt5,
     // Anthropic
     Sonnet4,
-    Opus4,
+    Opus41,
     // Google
     Gemini25Pro,
     // xAI
@@ -98,7 +96,7 @@ pub enum LanguageModel {
     DeepSeekV3,
     DeepSeekR1,
     // Zhipu
-    GLM4Plus,
+    Glm45,
     // StepFun
     Step216k,
     // Qwen
@@ -107,7 +105,6 @@ pub enum LanguageModel {
     // Doubao
     DoubaoSeed16,
     // Kimi
-    KimiLatest,
     KimiK2,
     // Mistral
     MistralLarge,
@@ -279,7 +276,7 @@ impl Taskable for Executor {
                     .expect("Failed to get the Open Router client for the agent.");
 
                 let result = match model {
-                    m if m == LanguageModel::ChatGPT4o || m == LanguageModel::GPT41 => {
+                    m if m == LanguageModel::Gpt5Chat || m == LanguageModel::Gpt41 => {
                         let chat = llm_clients_clone.openai_client.chat();
                         let future = chat.create(request);
                         tokio::time::timeout(std::time::Duration::from_secs(DEFAULT_SUBTASK_TIMEOUT), future).await
@@ -289,13 +286,8 @@ impl Taskable for Executor {
                         let future = chat.create(request);
                         tokio::time::timeout(std::time::Duration::from_secs(DEFAULT_SUBTASK_TIMEOUT), future).await
                     }
-                    LanguageModel::GLM4Plus => {
+                    LanguageModel::Glm45 => {
                         let chat = llm_clients_clone.zhipu_client.chat();
-                        let future = chat.create(request);
-                        tokio::time::timeout(std::time::Duration::from_secs(DEFAULT_SUBTASK_TIMEOUT), future).await
-                    }
-                    LanguageModel::KimiLatest => {
-                        let chat = llm_clients_clone.moonshot_client.chat();
                         let future = chat.create(request);
                         tokio::time::timeout(std::time::Duration::from_secs(DEFAULT_SUBTASK_TIMEOUT), future).await
                     }
@@ -356,10 +348,7 @@ impl Taskable for Executor {
         let results_dump = serde_json::to_string_pretty(&results)?;
 
         let transport_agent_prompt = if let Some(ref p) = self.transport_agent {
-            p.replace("$RETRY_COUNT", &MAX_TOOL_RETRY_COUNT.to_string())
-                .replace("$MAXIMUM_RETRY_REACHED", "")
-                .trim()
-                .to_string()
+            p.trim().to_string()
         } else {
             "".into()
         };
@@ -415,7 +404,7 @@ fn build_llm_request(
     messages: Vec<ChatCompletionRequestMessage>,
 ) -> anyhow::Result<CreateChatCompletionRequest> {
     let temperature = match model {
-        LanguageModel::KimiLatest => TEMPERATURE_LOW,
+        LanguageModel::KimiK2 => 0.6,
         LanguageModel::DeepSeekV3 => 1.8,
         _ => TEMPERATURE_HIGH,
     };

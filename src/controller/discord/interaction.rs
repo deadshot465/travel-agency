@@ -610,11 +610,16 @@ async fn execute_plan(
 
                                 let maximum_try_prompt = executor.transport_agent_maximum_try.clone().unwrap_or_default();
 
-                                for i in 0..MAX_TOOL_RETRY_COUNT {
+                                let mut retry_count = 0;
+                                loop {
+                                    if retry_count >= MAX_TOOL_RETRY_COUNT {
+                                        break;
+                                    }
+
                                     let user_prompt = executor
                                         .user_prompt
-                                        .replace("$RETRY_COUNT", &i.to_string())
-                                        .replace("$MAXIMUM_RETRY_REACHED", if i == MAX_TOOL_RETRY_COUNT - 1 {
+                                        .replace("$RETRY_COUNT", &retry_count.to_string())
+                                        .replace("$MAXIMUM_RETRY_REACHED", if retry_count == MAX_TOOL_RETRY_COUNT - 1 {
                                             &maximum_try_prompt
                                         } else {
                                             ""
@@ -638,18 +643,28 @@ async fn execute_plan(
 
                                     message_histories.push(ChatCompletionRequestMessage::Assistant(
                                         ChatCompletionRequestAssistantMessageArgs::default()
-                                            .content(assistant_message.content.unwrap_or_default())
-                                            .tool_calls(assistant_message.tool_calls.unwrap_or_default())
+                                            .content(assistant_message.content.clone().unwrap_or_default())
+                                            .tool_calls(assistant_message.tool_calls.clone().unwrap_or_default())
                                             .build()
                                             .expect("Failed to add assistant message to message histories.")));
 
+                                    let mut tool_call_failed = false;
                                     let results = handle_tool_call(
                                         tool_call.clone(),
                                         language,
                                         google_maps_client_clone.clone(),
                                     )
                                     .await
-                                    .expect("Failed to handle tool calls.");
+                                    .map_err(|e| {
+                                        tracing::error!("Failed to handle tool call: {e:?}");
+                                        tool_call_failed = true;
+                                    })
+                                    .unwrap_or_default();
+
+                                    if tool_call_failed {
+                                        retry_count += 1;
+                                        continue;
+                                    }
 
                                     let last_message = build_transport_agent_final_message(
                                         &mut message_histories,
@@ -687,6 +702,7 @@ async fn execute_plan(
                                             .expect("Failed to extract tool call from response.");
 
                                         assistant_message = last_message.message.clone();
+                                        retry_count += 1;
                                     }
                                 }
 
@@ -1151,11 +1167,11 @@ fn create_get_transit_time_tool() -> anyhow::Result<ChatCompletionTool> {
                                     "properties": {
                                         "from": {
                                             "type": "string",
-                                            "description": "The origin or start point of a route."
+                                            "description": "The origin or start point of a route. Make sure that it's a valid and correct place name."
                                         },
                                         "to": {
                                             "type": "string",
-                                            "description": "The destination, goal, or end point of a route."
+                                            "description": "The destination, goal, or end point of a route. Make sure that it's a valid and correct place name."
                                         },
                                         "by": {
                                             "type": "string",
