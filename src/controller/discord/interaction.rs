@@ -40,7 +40,7 @@ use crate::shared::structs::{AppState, LLMClients};
 use crate::shared::utility::google_maps::{get_latitude_and_longitude, get_travel_time};
 use crate::shared::utility::{build_one_shot_messages, create_avatar_url};
 use crate::shared::{
-    EMBED_COLOR, GEMINI_25_FLASH, GEMINI_25_PRO, GPT_41, GPT5, MAX_TOOL_RETRY_COUNT,
+    EMBED_COLOR, GEMINI_25_FLASH, GEMINI_25_PRO, GPT_41, MAX_TOOL_RETRY_COUNT,
     PLAN_COLLECTION_NAME, PLAN_MAPPING_COLLECTION_NAME, TEMPERATURE_LOW, TEMPERATURE_MEDIUM,
 };
 
@@ -1127,7 +1127,7 @@ async fn build_transport_agent_final_message(
 
     let mut request = CreateChatCompletionRequestArgs::default();
     request
-        .model(GPT5)
+        .model(GEMINI_25_PRO)
         .temperature(TEMPERATURE_MEDIUM)
         .messages(message_histories.clone());
 
@@ -1135,11 +1135,12 @@ async fn build_transport_agent_final_message(
         request.tools(vec![tool]);
     }
 
-    let response = llm_clients
-        .openai_client
-        .chat()
-        .create(request.build()?)
-        .await?;
+    let client = &*llm_clients
+        .open_router_clients
+        .get(&Agent::Transport)
+        .expect("Failed to get open router client for transport agent.");
+
+    let response = client.chat().create(request.build()?).await?;
 
     response.choices.first().cloned().ok_or(anyhow::anyhow!(
         "Failed to generate final message for transport agent."

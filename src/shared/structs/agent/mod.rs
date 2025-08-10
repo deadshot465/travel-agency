@@ -367,16 +367,9 @@ impl Taskable for Executor {
                 .trim(),
         );
 
-        tracing::info!("Agent system prompt: {}", &self.system_prompt);
-        tracing::info!("Agent user prompt: {}", &self.user_prompt);
-
         let messages = build_one_shot_messages(&self.system_prompt, &self.user_prompt)?;
 
-        let agent_model = if self.agent_type == Agent::Transport {
-            GPT5
-        } else {
-            SONNET_4
-        };
+        let agent_model = GEMINI_25_PRO;
 
         let mut request = CreateChatCompletionRequestArgs::default();
         request
@@ -384,7 +377,7 @@ impl Taskable for Executor {
             .temperature(TEMPERATURE_MEDIUM)
             .messages(messages);
 
-        let mut client = &*llm_clients
+        let client = &*llm_clients
             .open_router_clients
             .get(&self.agent_type)
             .expect("Failed to get the Open Router client for the agent.");
@@ -396,7 +389,7 @@ impl Taskable for Executor {
                 .tools(vec![tool.clone()])
                 .tool_choice(ChatCompletionToolChoiceOption::Required);
 
-            client = &llm_clients.openai_client;
+            // client = &llm_clients.openai_client;
         }
 
         client
