@@ -125,7 +125,7 @@ pub async fn plan(interaction: CommandInteraction, app_state: AppState) -> anyho
 
         let final_result = synthesize(language, results, &mut plan_record, &app_state).await?;
 
-        insert_record(plan_record, thread.id, &app_state).await?;
+        insert_record(plan_record, edited_message, thread.id, &app_state).await?;
 
         send_final_result_message(final_result, thread.id, &app_state).await?;
     }
@@ -896,6 +896,7 @@ async fn synthesize(
 
 async fn insert_record(
     plan_record: PlanRecord,
+    original_message: Message,
     thread_id: ChannelId,
     app_state: &AppState,
 ) -> anyhow::Result<()> {
@@ -920,6 +921,8 @@ async fn insert_record(
     let mapping = PlanMapping {
         plan_id: plan_record.id,
         thread_id,
+        channel_id: original_message.channel_id.get().to_string(),
+        original_message_id: original_message.id.get().to_string(),
     };
 
     let result = app_state

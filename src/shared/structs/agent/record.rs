@@ -33,6 +33,8 @@ pub struct Message {
 pub struct PlanMapping {
     pub plan_id: Uuid,
     pub thread_id: ChannelId,
+    pub channel_id: String,
+    pub original_message_id: String,
 }
 
 #[derive(Deserialize, Serialize, Debug, Clone)]
