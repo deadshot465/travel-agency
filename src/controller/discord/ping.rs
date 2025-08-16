@@ -1,20 +1,19 @@
 use std::time::Instant;
 
 use command_macros::command_handler;
-use serenity::all::{CommandInteraction, CreateMessage, EditMessage};
+use serenity::all::{CommandInteraction, EditInteractionResponse, EditMessage};
 
 use crate::shared::structs::AppState;
 
 #[command_handler]
 pub async fn ping(interaction: CommandInteraction, app_state: AppState) -> anyhow::Result<()> {
-    let channel_id = interaction.channel_id;
-    let message_args = CreateMessage::new().content("Pinging...");
+    let edited_content = EditInteractionResponse::new().content("Pinging...");
 
     let start = Instant::now();
 
     let mut message = app_state
         .http
-        .send_message(channel_id, vec![], &message_args)
+        .edit_original_interaction_response(&interaction.token, &edited_content, Vec::new())
         .await?;
 
     let end = Instant::now();
