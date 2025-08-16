@@ -69,6 +69,7 @@ pub async fn plan(interaction: CommandInteraction, app_state: AppState) -> anyho
 
     let mut plan_record = PlanRecord {
         id: uuid::Uuid::now_v7(),
+        language,
         messages: vec![
             RecordMessage {
                 role: Role::System,

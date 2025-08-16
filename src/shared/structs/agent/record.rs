@@ -7,7 +7,7 @@ use serde_json::Value;
 use serenity::all::ChannelId;
 use uuid::Uuid;
 
-use crate::shared::structs::agent::LanguageModel;
+use crate::shared::structs::agent::{Language, LanguageModel};
 
 #[derive(Deserialize, Serialize, Clone, Debug)]
 #[serde(untagged)]
@@ -20,6 +20,7 @@ pub enum Content {
 pub struct PlanRecord {
     pub id: Uuid,
     pub messages: Vec<Message>,
+    pub language: Language,
     pub dumps: Vec<GenerationDump>,
 }
 
