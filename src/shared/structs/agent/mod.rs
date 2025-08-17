@@ -84,7 +84,7 @@ pub enum Language {
     Other,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize, Default)]
 pub enum LanguageModel {
     // OpenAI
     Gpt5Chat,
@@ -94,6 +94,7 @@ pub enum LanguageModel {
     Sonnet4,
     Opus41,
     // Google
+    #[default]
     Gemini25Pro,
     // xAI
     Grok3,
@@ -322,7 +323,7 @@ impl Taskable for Executor {
 
                             {
                                 let mut dumps_lock = dumps.lock().await;
-                                dumps_lock.push(GenerationDump { model, content: extracted.clone() });
+                                dumps_lock.push(GenerationDump { model, content: extracted.clone(), ..Default::default() });
                             }
 
                             (model, extracted)

@@ -38,10 +38,11 @@ pub struct PlanMapping {
     pub original_message_id: String,
 }
 
-#[derive(Deserialize, Serialize, Debug, Clone)]
+#[derive(Deserialize, Serialize, Debug, Clone, Default)]
 pub struct GenerationDump {
     pub model: LanguageModel,
     pub content: String,
+    pub is_final_result: bool,
 }
 
 impl Message {

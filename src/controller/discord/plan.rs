@@ -87,6 +87,7 @@ pub async fn plan(interaction: CommandInteraction, app_state: AppState) -> anyho
         dumps: vec![GenerationDump {
             model: LanguageModel::Gemini25Pro,
             content: orchestration.to_string(),
+            ..Default::default()
         }],
     };
 
@@ -882,6 +883,7 @@ async fn synthesize(
             plan_record.dumps.push(GenerationDump {
                 model: LanguageModel::Gemini25Pro,
                 content: final_result.to_string(),
+                is_final_result: true,
             });
 
             tracing::info!("Final result: {:?}", &final_result);
