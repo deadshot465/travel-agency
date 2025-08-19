@@ -265,8 +265,6 @@ impl Taskable for Executor {
         let messages = build_one_shot_messages(&self.system_prompt, &subtask_user_prompt)?;
         let mut join_set = JoinSet::new();
 
-        tracing::debug!("Subtask user prompt: {}", &subtask_user_prompt);
-
         let generation_dumps = Arc::new(Mutex::new(Vec::new()));
 
         for entry in MODEL_NAME_MAP.iter() {
@@ -344,7 +342,6 @@ impl Taskable for Executor {
         }
 
         let results = join_set.join_all().await;
-        tracing::info!("Results: {:?}", &results);
 
         let results = results
             .into_iter()

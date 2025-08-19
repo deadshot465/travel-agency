@@ -818,7 +818,7 @@ async fn synthesize(
     let synthesis_prompt =
         synthesis_prompt.replace("$RESULTS", &serde_json::to_string_pretty(&results)?);
 
-    tracing::debug!("Synthesis prompt: {:?}", &synthesis_prompt);
+    tracing::info!("Synthesis prompt: {:?}", &synthesis_prompt);
 
     let mut messages = plan_record
         .messages
@@ -992,7 +992,7 @@ async fn handle_tool_call(
 ) -> anyhow::Result<Vec<RouteWithDuration>> {
     let transfer_plan = serde_json::from_str::<TransferPlan>(&tool_call.function.arguments)?;
 
-    tracing::debug!("Transfer Plan: {transfer_plan:?}");
+    tracing::info!("Transfer Plan: {transfer_plan:?}");
 
     let mut routes = Vec::with_capacity(transfer_plan.routes.len());
 
@@ -1028,7 +1028,7 @@ async fn handle_tool_call(
         });
     }
 
-    tracing::debug!("Direction UI results: {results:?}");
+    tracing::info!("Direction UI results: {results:?}");
 
     Ok(results)
 }
@@ -1048,8 +1048,6 @@ async fn build_transport_agent_final_message(
             .tool_call_id(tool_call_id)
             .build()?,
     ));
-
-    tracing::debug!("Messages with tool result: {:?}", &message_histories[2..]);
 
     let mut request = CreateChatCompletionRequestArgs::default();
     request

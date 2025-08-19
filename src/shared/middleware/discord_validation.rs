@@ -20,6 +20,9 @@ pub async fn validate_interaction(
         .and_then(|v| v.to_str().map(ToString::to_string).ok())
         .unwrap_or_default();
 
+    let uri = request.uri().clone();
+    tracing::info!("Request path: {}", uri.path());
+
     let timestamp = headers
         .get(TIMESTAMP_HEADER)
         .cloned()
